@@ -61,7 +61,7 @@ Unlike offensive recon tools that probe live websites, this server inspects **yo
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/guardx-mcp.git
+git clone https://github.com/harshzagade/guardx-mcp.git
 cd guardx-mcp
 
 # (recommended) create a virtual environment
