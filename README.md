@@ -39,7 +39,7 @@ Unlike offensive recon tools that probe live websites, this server inspects **yo
 - 📦 **Dependency auditing** — check `requirements.txt` (PyPI) and `package.json` (npm) against the free [OSV.dev](https://osv.dev) vulnerability database.
 - 🔐 **Breached-password check** — query [Have I Been Pwned](https://haveibeenpwned.com/Passwords) using **k-anonymity**; the password never leaves your machine.
 - 🚫 **No API keys, no accounts** — clone, install, run.
-- 🤖 **Native MCP** — works with Kiro CLI, Claude Desktop, Cursor, and any MCP client.
+- 🤖 **Native MCP** — works with Claude Code, Claude Desktop, Gemini CLI, OpenAI Codex, Cursor, and any MCP client.
 
 ## Screenshots
 
@@ -78,7 +78,34 @@ pip install -r requirements.txt
 
 ## Connect to an MCP Client
 
-Add the server to your client's MCP config (e.g. `claude_desktop_config.json` or your Kiro CLI MCP settings), adjusting the path:
+GuardX runs locally over **stdio**, so any MCP-capable client can launch it. In every example below, replace `/absolute/path/to/guardx-mcp/server.py` with the real path on your machine. If you used a virtual environment, point `command` at that env's Python (e.g. `.venv/bin/python` or `.venv\Scripts\python.exe`) instead of `python`.
+
+> 💡 First, confirm the server starts on its own (it then waits for a client on stdin — press `Ctrl+C` to exit):
+> ```bash
+> python server.py
+> ```
+
+<details open>
+<summary><b>Claude Code</b> (CLI)</summary>
+
+Register the server with one command:
+
+```bash
+claude mcp add guardx -- python /absolute/path/to/guardx-mcp/server.py
+```
+
+- Add `--scope project` to write it to a shared `.mcp.json` in your repo.
+- Verify with `claude mcp list`, then use `/mcp` inside Claude Code.
+
+</details>
+
+<details>
+<summary><b>Claude Desktop</b> (app)</summary>
+
+Edit your `claude_desktop_config.json`:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -91,11 +118,72 @@ Add the server to your client's MCP config (e.g. `claude_desktop_config.json` or
 }
 ```
 
-To confirm the server starts on its own (it then waits for an MCP client on stdin — press `Ctrl+C` to exit):
+Restart Claude Desktop; GuardX appears under the 🔌 tools menu.
+
+</details>
+
+<details>
+<summary><b>Gemini CLI</b> (& Gemini Code Assist)</summary>
+
+Edit `~/.gemini/settings.json` (global) or `.gemini/settings.json` (per-project). The Gemini Code Assist IDE extension reads the same file:
+
+```json
+{
+  "mcpServers": {
+    "guardx": {
+      "command": "python",
+      "args": ["/absolute/path/to/guardx-mcp/server.py"]
+    }
+  }
+}
+```
+
+Then run `gemini` and use `/mcp` to confirm the server is connected.
+
+</details>
+
+<details>
+<summary><b>OpenAI Codex</b> (CLI & IDE extension)</summary>
+
+Codex uses **TOML** and shares config between the CLI and the IDE extension. Either run:
 
 ```bash
-python server.py
+codex mcp add guardx -- python /absolute/path/to/guardx-mcp/server.py
 ```
+
+…or hand-edit `~/.codex/config.toml` ( note the **underscore** in `mcp_servers`):
+
+```toml
+[mcp_servers.guardx]
+command = "python"
+args = ["/absolute/path/to/guardx-mcp/server.py"]
+```
+
+> Codex only supports **local stdio** MCP servers — perfect for GuardX.
+
+</details>
+
+<details>
+<summary><b>Cursor</b> / <b>VS Code</b></summary>
+
+Create `.cursor/mcp.json` in your project (or the global `~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "guardx": {
+      "command": "python",
+      "args": ["/absolute/path/to/guardx-mcp/server.py"]
+    }
+  }
+}
+```
+
+VS Code (with MCP support) uses the same `mcpServers` shape in its settings.
+
+</details>
+
+> **Windows tip:** in JSON, write paths with forward slashes (`C:/Users/you/guardx-mcp/server.py`) or escaped backslashes (`C:\\Users\\you\\...`).
 
 ## Usage
 
