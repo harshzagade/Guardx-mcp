@@ -1,6 +1,6 @@
 """
-Code Security Auditor MCP Server
-================================
+GuardX - Code Security Auditor MCP Server
+=========================================
 
 A keyless, *defensive* (blue-team) security toolkit exposed over the
 Model Context Protocol (MCP). It inspects **local codebases** rather than
@@ -27,9 +27,9 @@ import hashlib
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("code-security-auditor")
+mcp = FastMCP("guardx")
 
-USER_AGENT = "code-security-auditor-mcp/1.0"
+USER_AGENT = "guardx-mcp/1.0"
 HTTP_TIMEOUT = 20.0
 
 

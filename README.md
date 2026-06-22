@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🛡️ Code Security Auditor — MCP Server
+# 🛡️ GuardX
 
-**A keyless, defensive (blue-team) security toolkit for the [Model Context Protocol](https://modelcontextprotocol.io).**
+**A keyless, defensive (blue-team) code-security auditor for the [Model Context Protocol](https://modelcontextprotocol.io).**
 Let your AI assistant scan codebases for secrets, audit dependencies for known CVEs, and check passwords against breach data — all from natural language.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -61,8 +61,8 @@ Unlike offensive recon tools that probe live websites, this server inspects **yo
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/code-security-auditor-mcp.git
-cd code-security-auditor-mcp
+git clone https://github.com/<your-username>/guardx-mcp.git
+cd guardx-mcp
 
 # (recommended) create a virtual environment
 python -m venv .venv
@@ -83,9 +83,9 @@ Add the server to your client's MCP config (e.g. `claude_desktop_config.json` or
 ```json
 {
   "mcpServers": {
-    "code-security-auditor": {
+    "guardx": {
       "command": "python",
-      "args": ["/absolute/path/to/code-security-auditor-mcp/server.py"]
+      "args": ["/absolute/path/to/guardx-mcp/server.py"]
     }
   }
 }
@@ -128,7 +128,7 @@ Once connected, just ask your assistant in plain language:
 ## Project Structure
 
 ```
-code-security-auditor-mcp/
+guardx-mcp/
 ├── server.py          # MCP server + the three tools
 ├── requirements.txt   # runtime dependencies (mcp, httpx)
 ├── assets/            # README screenshots
