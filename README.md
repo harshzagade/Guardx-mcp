@@ -27,9 +27,12 @@ Unlike offensive recon tools that probe live websites, this server inspects **yo
 - [Installation](#installation)
 - [Connect to an MCP Client](#connect-to-an-mcp-client)
 - [Usage](#usage)
+- [Sample output](#sample-output)
 - [How the Privacy-Safe Password Check Works](#how-the-privacy-safe-password-check-works)
+- [Data sources](#data-sources)
 - [Tool Reference](#tool-reference)
 - [Project Structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -61,8 +64,8 @@ Unlike offensive recon tools that probe live websites, this server inspects **yo
 ## Installation
 
 ```bash
-git clone https://github.com/harshzagade/guardx-mcp.git
-cd guardx-mcp
+git clone https://github.com/harshzagade/Guardx-mcp.git
+cd Guardx-mcp
 
 # (recommended) create a virtual environment
 python -m venv .venv
@@ -195,6 +198,57 @@ Once connected, just ask your assistant in plain language:
 | *"Audit `requirements.txt` for known vulnerabilities"* | `audit_dependencies` |
 | *"Has the password `password123` been pwned?"* | `check_pwned_password` |
 
+## Sample output
+
+Real output from running the tools (secrets shown are intentionally fake):
+
+**`scan_secrets("demo-project")`**
+
+```
+Secret scan of demo-project
+Files scanned: 1
+Findings: 2
+
+  [!] AWS Access Key ID
+      demo-project/app.py:1
+      match: AKIA...LE (len 20)
+
+  [!] Stripe Secret Key
+      demo-project/app.py:2
+      match: sk_l...dc (len 32)
+
+Note: these are heuristic matches and may include false positives. Rotate any real secret that is committed to source control.
+```
+
+**`audit_dependencies("requirements.txt")`** — with `requests==2.28.0` and `urllib3==1.26.0` pinned:
+
+```
+Dependency audit of requirements.txt
+Ecosystem: PyPI
+Dependencies checked: 2
+Vulnerable packages: 2
+
+  [!] requests==2.28.0  -> 8 known vuln(s)
+      - GHSA-9hjg-9r4m-mvj7 (CVE-2024-47081, PYSEC-2026-1872): Requests vulnerable to .netrc credentials leak via malicious URLs
+      - GHSA-9wx4-h78v-vm56 (CVE-2024-35195, PYSEC-2026-1873): Requests `Session` object does not verify requests after making first request with verify=False
+      - GHSA-gc5v-m9x4-r6x2 (CVE-2026-25645, PYSEC-2026-2275): Requests has Insecure Temp File Reuse in its extract_zipped_paths() utility function
+      ...
+
+  [!] urllib3==1.26.0  -> 24 known vuln(s)
+      - GHSA-2xpw-w6gg-jr37 (CVE-2025-66471, PYSEC-2026-1994): urllib3 streaming API improperly handles highly compressed data
+      ...
+```
+
+**`check_pwned_password("password123")`**
+
+```
+WARNING: this password has appeared in known breaches 2,266,543 times. [!]
+Do not use it. Choose a unique, strong password and enable MFA.
+(Only the SHA-1 prefix was sent; the password never left this machine.)
+```
+
+A password not found in any breach returns `Good news: this password was NOT found in any known breach. [OK]`.
+
 ## How the Privacy-Safe Password Check Works
 
 `check_pwned_password` follows the [k-anonymity model](https://haveibeenpwned.com/API/v3#PwnedPasswords) recommended by Have I Been Pwned:
@@ -204,6 +258,11 @@ Once connected, just ask your assistant in plain language:
 3. The API returns all hash suffixes sharing that prefix; the match is found **locally**.
 
 ➡️ Your password and its full hash **never leave your machine**.
+
+## Data sources
+
+- **Vulnerabilities:** `audit_dependencies` queries the [OSV.dev](https://osv.dev) API **live on every run** — there is no local vulnerability database to download or refresh, so results reflect the latest published advisories at query time. Each query sends only `{package name, version, ecosystem}`. Internet access is required; lookups that fail (network error or non-200 response) are reported in the output rather than silently dropped.
+- **Breached passwords:** `check_pwned_password` uses the [Have I Been Pwned Pwned Passwords API](https://haveibeenpwned.com/API/v3#PwnedPasswords) with k-anonymity (see above). Internet access is required.
 
 ## Tool Reference
 
@@ -221,9 +280,18 @@ guardx-mcp/
 ├── requirements.txt   # runtime dependencies (mcp, httpx)
 ├── assets/            # README screenshots
 ├── README.md
+├── CHANGELOG.md
 ├── LICENSE            # MIT
 └── .gitignore
 ```
+
+## Troubleshooting
+
+- **`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`** — you installed `mcp` 2.x, which renamed `FastMCP` to `MCPServer`. GuardX targets the 1.x SDK, so pin it in your venv:
+  ```bash
+  pip install "mcp<2" httpx
+  ```
+- **`audit_dependencies` / `check_pwned_password` report network failures** — both tools need internet access (OSV.dev and Have I Been Pwned respectively). Corporate proxies may need to be configured in your environment.
 
 ## Contributing
 
