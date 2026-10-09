@@ -47,6 +47,15 @@ SECRET_PATTERNS = {
     "Slack Token": re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b"),
     "Google API Key": re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     "Stripe Secret Key": re.compile(r"\bsk_live_[0-9a-zA-Z]{24,}\b"),
+    "Stripe Restricted Key": re.compile(r"\brk_live_[0-9a-zA-Z]{24,}\b"),
+    "Discord Bot Token": re.compile(
+        r"\b(?:mfa\.[\w\-]{84}|[MN][A-Za-z\d]{23}\.[\w\-]{6}\.[\w\-]{27})\b"
+    ),
+    "Slack Webhook URL": re.compile(
+        r"https://hooks\.slack\.com/services/T[A-Z0-9]{6,}/B[A-Z0-9]{6,}/[A-Za-z0-9]{20,}"
+    ),
+    "GitLab Personal Access Token": re.compile(r"\bglpat-[0-9A-Za-z_\-]{20,}\b"),
+    "SendGrid API Key": re.compile(r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{30,}\b"),
     "Private Key Block": re.compile(
         r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
     ),

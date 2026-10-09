@@ -5,6 +5,12 @@ actual git history — no invented features.
 
 ## [Unreleased]
 
+### Added
+- `scan_secrets`: 5 new detection patterns — Stripe Restricted Key
+  (`rk_live_`), Discord Bot Token (classic `M…`/`N…` and `mfa.` forms),
+  Slack Incoming Webhook URL, GitLab Personal Access Token (`glpat-`),
+  and SendGrid API Key (`SG.…`).
+
 ### Docs
 - README: added a **Sample output** section with real output captured from
   all three tools (`scan_secrets`, `audit_dependencies` against
