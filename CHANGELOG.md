@@ -5,6 +5,13 @@ actual git history — no invented features.
 
 ## [Unreleased]
 
+### Fixed
+- `requirements.txt`: pinned `mcp` to `>=1.2.0,<2` — the unpinned
+  `mcp>=1.2.0` pulled mcp 2.x on fresh installs, whose stub
+  `fastmcp.py` raises and breaks `server.py`. The pin matches the
+  README's Troubleshooting guidance (verified: a fresh venv now
+  resolves to mcp 1.30.0 and `server.py` imports cleanly).
+
 ### Added
 - `scan_secrets`: 5 new detection patterns — Stripe Restricted Key
   (`rk_live_`), Discord Bot Token (classic `M…`/`N…` and `mfa.` forms),
