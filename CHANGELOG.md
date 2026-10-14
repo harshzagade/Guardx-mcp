@@ -5,6 +5,13 @@ actual git history — no invented features.
 
 ## [Unreleased]
 
+### Added
+- `tests/test_pwned_password.py`: 10 unit tests for `check_pwned_password`
+  (breached/clean verdicts, count formatting, prefix-only transmission,
+  case-insensitive suffix match, network/HTTP error paths, `Add-Padding`
+  and User-Agent headers, malformed-line tolerance). Runs with stdlib-only
+  pytest via `mcp`/`httpx` stubs — no third-party installs needed.
+
 ### Fixed
 - `requirements.txt`: pinned `mcp` to `>=1.2.0,<2` — the unpinned
   `mcp>=1.2.0` pulled mcp 2.x on fresh installs, whose stub
@@ -31,6 +38,12 @@ actual git history — no invented features.
 - README: fixed the local folder name in the clone instructions
   (`cd Guardx-mcp`, matching what `git clone` actually creates).
 - Added this CHANGELOG.
+
+### Docs
+- README **Data sources**: documented refresh cadence for both data sources
+  (OSV ingestion freshness caveat; HIBP corpus is refreshed by HIBP as new
+  breaches are added — counts reflect the corpus at query time) and the
+  `Add-Padding: true` privacy detail in the k-anonymity section.
 
 ## 2026-06-22 — docs: MCP client setup
 
