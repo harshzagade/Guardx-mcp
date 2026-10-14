@@ -256,16 +256,13 @@ A password not found in any breach returns `Good news: this password was NOT fou
 1. The password is hashed locally with **SHA-1**.
 2. Only the **first 5 hex characters** of the hash are sent to the HIBP range API.
 3. The API returns all hash suffixes sharing that prefix; the match is found **locally**.
-4. The request sends `Add-Padding: true`, so every response is padded to the
-   same size — a network observer cannot infer which prefix you looked up
-   from the response length.
 
 ➡️ Your password and its full hash **never leave your machine**.
 
 ## Data sources
 
-- **Vulnerabilities:** `audit_dependencies` queries the [OSV.dev](https://osv.dev) API **live on every run** — there is no local vulnerability database to download or refresh, so results reflect the latest published advisories at query time. Each query sends only `{package name, version, ecosystem}`. Freshness caveat: advisories appear in OSV as it ingests them from upstream sources (NVD, GitHub Security Advisories, PyPA, …), so a brand-new CVE may take a little while to show up. Internet access is required; lookups that fail (network error or non-200 response) are reported in the output rather than silently dropped.
-- **Breached passwords:** `check_pwned_password` uses the [Have I Been Pwned Pwned Passwords API](https://haveibeenpwned.com/API/v3#PwnedPasswords) with k-anonymity (see above). Internet access is required. The breach corpus is maintained by HIBP and refreshed as new breaches are added — the breach counts you see reflect the corpus at query time, not a fixed snapshot.
+- **Vulnerabilities:** `audit_dependencies` queries the [OSV.dev](https://osv.dev) API **live on every run** — there is no local vulnerability database to download or refresh, so results reflect the latest published advisories at query time. Each query sends only `{package name, version, ecosystem}`. Internet access is required; lookups that fail (network error or non-200 response) are reported in the output rather than silently dropped.
+- **Breached passwords:** `check_pwned_password` uses the [Have I Been Pwned Pwned Passwords API](https://haveibeenpwned.com/API/v3#PwnedPasswords) with k-anonymity (see above). Internet access is required.
 
 ## Tool Reference
 

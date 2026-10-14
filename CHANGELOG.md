@@ -39,12 +39,6 @@ actual git history — no invented features.
   (`cd Guardx-mcp`, matching what `git clone` actually creates).
 - Added this CHANGELOG.
 
-### Docs
-- README **Data sources**: documented refresh cadence for both data sources
-  (OSV ingestion freshness caveat; HIBP corpus is refreshed by HIBP as new
-  breaches are added — counts reflect the corpus at query time) and the
-  `Add-Padding: true` privacy detail in the k-anonymity section.
-
 ## 2026-06-22 — docs: MCP client setup
 
 - Setup guides for five clients: Claude Code (CLI), Claude Desktop (app),
