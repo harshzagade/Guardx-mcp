@@ -6,6 +6,11 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: long lines are now scanned with a sliding window instead
+  of being skipped — minified bundles are chunked into overlapping
+  2000-char windows (1500-char stride), so secrets buried past the old
+  2000-char cutoff, including ones straddling a window boundary, are
+  caught; still at most one finding per line.
 - `scan_secrets`: severity-graded findings — every pattern is now marked
   HIGH (live credentials, private key blocks), MED (generic secret
   assignments), or LOW; each finding carries its `[SEV]` tag and the

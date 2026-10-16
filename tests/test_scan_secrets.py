@@ -155,3 +155,64 @@ class TestSeverityGrading:
         report = server.scan_secrets(fp)
         assert secret not in report
         assert "[HIGH] GitHub Token" in report
+
+
+# ---------------------------------------------------------------------------
+# Long-line sliding window
+# ---------------------------------------------------------------------------
+
+class TestLongLineSlidingWindow:
+    def test_secret_buried_in_long_line_is_found(self, tmp_path):
+        # Old behaviour skipped lines >2000 chars outright; a secret 4000
+        # chars into a minified bundle must now be caught.
+        secret = "ghp_" + "b" * 36
+        line = "x" * 4000 + f' TOKEN="{secret}" ' + "y" * 4000 + "\n"
+        assert len(line) > 2000
+        fp = _write(tmp_path, "bundle.min.js", line)
+        report = server.scan_secrets(fp)
+        assert "[HIGH] GitHub Token" in report
+        assert secret not in report  # still masked
+        assert "Findings: 1" in report
+
+    def test_secret_straddling_window_boundary_is_caught(self, tmp_path):
+        # The 500-char overlap must catch a secret sitting across the
+        # 2000-char window edge (window 1: 0-2000, window 2: 1500-3500).
+        secret = "ghp_" + "c" * 36
+        line = "x" * 1990 + f'"{secret}"' + "y" * 3000 + "\n"
+        assert 1990 < 2000 < 1990 + len(secret) + 2  # truly straddles
+        fp = _write(tmp_path, "bundle.min.js", line)
+        report = server.scan_secrets(fp)
+        assert "[HIGH] GitHub Token" in report
+
+    def test_long_line_reports_only_one_finding(self, tmp_path):
+        # The same secret appearing in two windows of one line is still a
+        # single finding (one finding per line).
+        secret = "ghp_" + "d" * 36
+        line = f'"{secret}"' + "x" * 3000 + f'"{secret}"' + "\n"
+        fp = _write(tmp_path, "bundle.min.js", line)
+        report = server.scan_secrets(fp)
+        assert "Findings: 1 (HIGH: 1, MED: 0, LOW: 0)" in report
+
+    def test_clean_long_line_stays_clean(self, tmp_path):
+        line = "var x = " + "9" * 5000 + ";\n"
+        fp = _write(tmp_path, "bundle.min.js", line)
+        report = server.scan_secrets(fp)
+        assert "No hardcoded secrets detected. [OK]" in report
+
+    def test_line_windows_overlap_and_cover(self):
+        # Direct unit check of the chunking: full coverage, 500-char overlap.
+        line = "a" * 5000
+        windows = list(server._line_windows(line))
+        assert windows[0] == line[:2000]
+        assert windows[1] == line[1500:3500]
+        assert windows[-1].endswith("a" * 500)
+        # Every offset of the line appears in at least one window.
+        covered = set()
+        for i, w in enumerate(windows):
+            start = i * server.LONG_LINE_STEP
+            covered.update(range(start, start + len(w)))
+        assert covered == set(range(5000))
+
+    def test_short_lines_use_single_window(self):
+        line = "short line\n"
+        assert list(server._line_windows(line)) == [line]

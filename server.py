@@ -123,6 +123,36 @@ SKIP_EXTS = {
 }
 MAX_FILE_BYTES = 1_000_000  # skip files larger than ~1 MB
 
+# Long (e.g. minified) lines are scanned in overlapping windows instead of
+# being skipped outright. The 500-char overlap guarantees a secret sitting
+# on a window boundary is still caught.
+LONG_LINE_WINDOW = 2000
+LONG_LINE_STEP = 1500
+
+
+def _line_windows(line: str):
+    """Yield the scan window(s) for a line: the whole line, or overlapping
+    chunks when it exceeds LONG_LINE_WINDOW."""
+    if len(line) <= LONG_LINE_WINDOW:
+        yield line
+        return
+    for start in range(0, len(line), LONG_LINE_STEP):
+        yield line[start:start + LONG_LINE_WINDOW]
+        if start + LONG_LINE_WINDOW >= len(line):
+            break
+
+
+def _match_line(line: str):
+    """Return (name, severity, secret) for the first secret-pattern hit in
+    `line`, or None when the line is clean. Long lines are scanned in
+    overlapping windows; at most one finding per line is returned."""
+    for window in _line_windows(line):
+        for name, (severity, pattern) in SECRET_PATTERNS.items():
+            m = pattern.search(window)
+            if m:
+                return name, severity, m.group(0)
+    return None
+
 
 def _mask(secret: str) -> str:
     secret = secret.strip()
@@ -171,18 +201,15 @@ def scan_secrets(path: str, max_findings: int = 200) -> str:
         scanned += 1
 
         for lineno, line in enumerate(lines, start=1):
-            if len(line) > 2000:  # avoid pathological minified lines
-                continue
-            for name, (severity, pattern) in SECRET_PATTERNS.items():
-                m = pattern.search(line)
-                if m:
-                    sev_counts[severity] += 1
-                    findings.append(
-                        f"  [{severity}] {name}\n"
-                        f"      {fp}:{lineno}\n"
-                        f"      match: {_mask(m.group(0))}"
-                    )
-                    break  # one finding per line is enough
+            hit = _match_line(line)
+            if hit:
+                name, severity, secret = hit
+                sev_counts[severity] += 1
+                findings.append(
+                    f"  [{severity}] {name}\n"
+                    f"      {fp}:{lineno}\n"
+                    f"      match: {_mask(secret)}"
+                )
             if len(findings) >= max_findings:
                 break
         if len(findings) >= max_findings:
