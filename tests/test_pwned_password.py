@@ -22,7 +22,15 @@ from pathlib import Path
 # Module stubs
 # ---------------------------------------------------------------------------
 
+# Installed exactly once per pytest process (this file may share the process
+# with other GuardX test modules): stub objects must be shared, otherwise a
+# monkeypatch in one module misses the objects bound by another.
+_STUB_SENTINEL = "__guardx_test_stubs_installed__"
+
+
 def _install_stubs() -> None:
+    if getattr(sys, _STUB_SENTINEL, False):
+        return
     # --- httpx stub --------------------------------------------------------
     httpx = types.ModuleType("httpx")
 
@@ -60,6 +68,7 @@ def _install_stubs() -> None:
     sys.modules["mcp"] = mcp
     sys.modules["mcp.server"] = server_pkg
     sys.modules["mcp.server.fastmcp"] = fastmcp_mod
+    setattr(sys, _STUB_SENTINEL, True)
 
 
 _install_stubs()

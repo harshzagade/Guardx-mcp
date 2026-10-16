@@ -37,33 +37,78 @@ HTTP_TIMEOUT = 20.0
 # Tool 1: secret scanning
 # ---------------------------------------------------------------------------
 
-# name -> compiled regex. Patterns favour low false-positives.
+# name -> (severity, compiled regex). Patterns favour low false-positives.
+# Severities: HIGH = a live credential or private-key material — rotate
+# immediately. MED = credential-like heuristic with real false-positive
+# risk (generic assignments). LOW = weak or context-poor signal.
 SECRET_PATTERNS = {
-    "AWS Access Key ID": re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"),
-    "AWS Secret Access Key": re.compile(
-        r"(?i)aws.{0,20}?(secret|key).{0,5}['\"][0-9a-zA-Z/+]{40}['\"]"
+    "AWS Access Key ID": (
+        "HIGH",
+        re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"),
     ),
-    "GitHub Token": re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36,}\b"),
-    "Slack Token": re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b"),
-    "Google API Key": re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
-    "Stripe Secret Key": re.compile(r"\bsk_live_[0-9a-zA-Z]{24,}\b"),
-    "Stripe Restricted Key": re.compile(r"\brk_live_[0-9a-zA-Z]{24,}\b"),
-    "Discord Bot Token": re.compile(
-        r"\b(?:mfa\.[\w\-]{84}|[MN][A-Za-z\d]{23}\.[\w\-]{6}\.[\w\-]{27})\b"
+    "AWS Secret Access Key": (
+        "HIGH",
+        re.compile(
+            r"(?i)aws.{0,20}?(secret|key).{0,5}['\"][0-9a-zA-Z/+]{40}['\"]"
+        ),
     ),
-    "Slack Webhook URL": re.compile(
-        r"https://hooks\.slack\.com/services/T[A-Z0-9]{6,}/B[A-Z0-9]{6,}/[A-Za-z0-9]{20,}"
+    "GitHub Token": (
+        "HIGH",
+        re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36,}\b"),
     ),
-    "GitLab Personal Access Token": re.compile(r"\bglpat-[0-9A-Za-z_\-]{20,}\b"),
-    "SendGrid API Key": re.compile(r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{30,}\b"),
-    "Private Key Block": re.compile(
-        r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+    "Slack Token": (
+        "HIGH",
+        re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b"),
     ),
-    "Generic Secret Assignment": re.compile(
-        r"(?i)(?:api[_-]?key|secret|token|passwd|password)\s*[:=]\s*"
-        r"['\"][^'\"\s]{8,}['\"]"
+    "Google API Key": (
+        "HIGH",
+        re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     ),
-    "JWT": re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+    "Stripe Secret Key": (
+        "HIGH",
+        re.compile(r"\bsk_live_[0-9a-zA-Z]{24,}\b"),
+    ),
+    "Stripe Restricted Key": (
+        "HIGH",
+        re.compile(r"\brk_live_[0-9a-zA-Z]{24,}\b"),
+    ),
+    "Discord Bot Token": (
+        "HIGH",
+        re.compile(
+            r"\b(?:mfa\.[\w\-]{84}|[MN][A-Za-z\d]{23}\.[\w\-]{6}\.[\w\-]{27})\b"
+        ),
+    ),
+    "Slack Webhook URL": (
+        "HIGH",
+        re.compile(
+            r"https://hooks\.slack\.com/services/T[A-Z0-9]{6,}/B[A-Z0-9]{6,}/[A-Za-z0-9]{20,}"
+        ),
+    ),
+    "GitLab Personal Access Token": (
+        "HIGH",
+        re.compile(r"\bglpat-[0-9A-Za-z_\-]{20,}\b"),
+    ),
+    "SendGrid API Key": (
+        "HIGH",
+        re.compile(r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{30,}\b"),
+    ),
+    "Private Key Block": (
+        "HIGH",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+        ),
+    ),
+    "Generic Secret Assignment": (
+        "MED",
+        re.compile(
+            r"(?i)(?:api[_-]?key|secret|token|passwd|password)\s*[:=]\s*"
+            r"['\"][^'\"\s]{8,}['\"]"
+        ),
+    ),
+    "JWT": (
+        "HIGH",
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+    ),
 }
 
 IGNORE_DIRS = {
@@ -113,6 +158,7 @@ def scan_secrets(path: str, max_findings: int = 200) -> str:
                 files.append(os.path.join(root, n))
 
     findings = []
+    sev_counts = {"HIGH": 0, "MED": 0, "LOW": 0}
     scanned = 0
     for fp in files:
         try:
@@ -127,11 +173,12 @@ def scan_secrets(path: str, max_findings: int = 200) -> str:
         for lineno, line in enumerate(lines, start=1):
             if len(line) > 2000:  # avoid pathological minified lines
                 continue
-            for name, pattern in SECRET_PATTERNS.items():
+            for name, (severity, pattern) in SECRET_PATTERNS.items():
                 m = pattern.search(line)
                 if m:
+                    sev_counts[severity] += 1
                     findings.append(
-                        f"  [!] {name}\n"
+                        f"  [{severity}] {name}\n"
                         f"      {fp}:{lineno}\n"
                         f"      match: {_mask(m.group(0))}"
                     )
@@ -141,7 +188,12 @@ def scan_secrets(path: str, max_findings: int = 200) -> str:
         if len(findings) >= max_findings:
             break
 
-    header = f"Secret scan of {path}\nFiles scanned: {scanned}\nFindings: {len(findings)}"
+    sev_summary = ", ".join(f"{s}: {sev_counts[s]}" for s in ("HIGH", "MED", "LOW"))
+    header = (
+        f"Secret scan of {path}\n"
+        f"Files scanned: {scanned}\n"
+        f"Findings: {len(findings)} ({sev_summary})"
+    )
     if not findings:
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     note = (

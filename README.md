@@ -207,15 +207,15 @@ Real output from running the tools (secrets shown are intentionally fake):
 ```
 Secret scan of demo-project
 Files scanned: 1
-Findings: 2
+Findings: 2 (HIGH: 2, MED: 0, LOW: 0)
 
-  [!] AWS Access Key ID
+  [HIGH] AWS Access Key ID
       demo-project/app.py:1
       match: AKIA...LE (len 20)
 
-  [!] Stripe Secret Key
+  [HIGH] Stripe Secret Key
       demo-project/app.py:2
-      match: sk_l...dc (len 32)
+      match: sk_l...Ab (len 33)
 
 Note: these are heuristic matches and may include false positives. Rotate any real secret that is committed to source control.
 ```
@@ -256,19 +256,22 @@ A password not found in any breach returns `Good news: this password was NOT fou
 1. The password is hashed locally with **SHA-1**.
 2. Only the **first 5 hex characters** of the hash are sent to the HIBP range API.
 3. The API returns all hash suffixes sharing that prefix; the match is found **locally**.
+4. The request sends `Add-Padding: true`, so every response is padded to the
+   same size — a network observer cannot infer which prefix you looked up
+   from the response length.
 
 ➡️ Your password and its full hash **never leave your machine**.
 
 ## Data sources
 
-- **Vulnerabilities:** `audit_dependencies` queries the [OSV.dev](https://osv.dev) API **live on every run** — there is no local vulnerability database to download or refresh, so results reflect the latest published advisories at query time. Each query sends only `{package name, version, ecosystem}`. Internet access is required; lookups that fail (network error or non-200 response) are reported in the output rather than silently dropped.
-- **Breached passwords:** `check_pwned_password` uses the [Have I Been Pwned Pwned Passwords API](https://haveibeenpwned.com/API/v3#PwnedPasswords) with k-anonymity (see above). Internet access is required.
+- **Vulnerabilities:** `audit_dependencies` queries the [OSV.dev](https://osv.dev) API **live on every run** — there is no local vulnerability database to download or refresh, so results reflect the latest published advisories at query time. Each query sends only `{package name, version, ecosystem}`. Freshness caveat: advisories appear in OSV as it ingests them from upstream sources (NVD, GitHub Security Advisories, PyPA, …), so a brand-new CVE may take a little while to show up. Internet access is required; lookups that fail (network error or non-200 response) are reported in the output rather than silently dropped.
+- **Breached passwords:** `check_pwned_password` uses the [Have I Been Pwned Pwned Passwords API](https://haveibeenpwned.com/API/v3#PwnedPasswords) with k-anonymity (see above). Internet access is required. The breach corpus is maintained by HIBP and refreshed as new breaches are added — the breach counts you see reflect the corpus at query time, not a fixed snapshot.
 
 ## Tool Reference
 
 | Tool | Signature | Description |
 | --- | --- | --- |
-| **Secret scanner** | `scan_secrets(path, max_findings=200)` | Recursively scans a file or directory for hardcoded secrets. Skips binaries and common ignore dirs (`.git`, `node_modules`, …). Returns masked findings with file and line number. |
+| **Secret scanner** | `scan_secrets(path, max_findings=200)` | Recursively scans a file or directory for hardcoded secrets. Skips binaries and common ignore dirs (`.git`, `node_modules`, …). Findings are graded HIGH/MED/LOW and the report header carries per-severity counts; values are masked so reports are safe to share. |
 | **Dependency auditor** | `audit_dependencies(path)` | Parses a `requirements.txt` or `package.json` and checks each pinned dependency against OSV.dev. Returns CVE/GHSA ids and summaries. |
 | **Pwned-password check** | `check_pwned_password(password)` | Checks a password against HIBP via k-anonymity. Reports breach count without transmitting the password. |
 

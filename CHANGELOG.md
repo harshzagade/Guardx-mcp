@@ -6,6 +6,16 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: severity-graded findings — every pattern is now marked
+  HIGH (live credentials, private key blocks), MED (generic secret
+  assignments), or LOW; each finding carries its `[SEV]` tag and the
+  report header prints per-severity counts
+  (`Findings: N (HIGH: x, MED: y, LOW: z)`).
+- `tests/test_scan_secrets.py`: 7 unit tests for the severity grading
+  (HIGH/MED tags, header counts, clean-report zeros, masking intact).
+  Stub installation is now idempotent across test modules via a
+  process-wide sentinel so `tests/` run green together; each module loads
+  `server.py` under its own name to avoid clobbering `sys.modules`.
 - `tests/test_pwned_password.py`: 10 unit tests for `check_pwned_password`
   (breached/clean verdicts, count formatting, prefix-only transmission,
   case-insensitive suffix match, network/HTTP error paths, `Add-Padding`
@@ -38,6 +48,12 @@ actual git history — no invented features.
 - README: fixed the local folder name in the clone instructions
   (`cd Guardx-mcp`, matching what `git clone` actually creates).
 - Added this CHANGELOG.
+
+### Docs
+- README **Data sources**: documented refresh cadence for both data sources
+  (OSV ingestion freshness caveat; HIBP corpus is refreshed by HIBP as new
+  breaches are added — counts reflect the corpus at query time) and the
+  `Add-Padding: true` privacy detail in the k-anonymity section.
 
 ## 2026-06-22 — docs: MCP client setup
 
