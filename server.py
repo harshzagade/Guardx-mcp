@@ -19,6 +19,7 @@ Use only on code and credentials you own or are authorized to assess.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import json
@@ -130,6 +131,95 @@ LONG_LINE_WINDOW = 2000
 LONG_LINE_STEP = 1500
 
 
+def _load_gitignore(scan_root: str) -> list[str]:
+    """Return the raw (comment/blank-stripped) patterns from a `.gitignore`
+    sitting at the scan root, or [] when there is no readable one."""
+    patterns = []
+    gi = os.path.join(scan_root, ".gitignore")
+    try:
+        with open(gi, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    patterns.append(stripped)
+    except OSError:
+        pass
+    return patterns
+
+
+def _seg_match(pat_segs: list[str], path_segs: list[str]) -> bool:
+    """Match pattern segments against path segments; a `**` pattern segment
+    consumes zero or more path segments. Within a segment, `*`, `?` and
+    `[...]` follow fnmatch semantics (`*` never crosses a `/`, since each
+    segment is matched individually)."""
+    def rec(pi: int, si: int) -> bool:
+        if pi == len(pat_segs):
+            return si == len(path_segs)
+        if pat_segs[pi] == "**":
+            return any(rec(pi + 1, k) for k in range(si, len(path_segs) + 1))
+        if si == len(path_segs):
+            return False
+        return fnmatch.fnmatchcase(path_segs[si], pat_segs[pi]) and rec(pi + 1, si + 1)
+    return rec(0, 0)
+
+
+def _gitignore_ignored(patterns: list[str], rel_path: str, is_dir: bool) -> bool:
+    """True when `rel_path` (posix-style, relative to the scan root) is
+    ignored by `patterns` following the practical subset of gitignore rules:
+    basename patterns match at any depth (dir matches cascade to their
+    contents), patterns containing `/` (beyond a trailing one) or a leading
+    `/` are anchored to the scan root, a trailing `/` restricts to
+    directories, `!` negates, and the last matching pattern wins. Directory
+    pruning happens in `os.walk`, so a matched dir's children are never
+    visited."""
+    rel = rel_path.replace(os.sep, "/")
+    rel_segs = rel.split("/")
+    ignored = False
+    for raw in patterns:
+        neg = raw.startswith("!")
+        pat = raw[1:] if neg else raw
+        dir_only = pat.endswith("/")
+        body = pat.rstrip("/")
+        anchored = body.startswith("/")
+        body = body.lstrip("/")
+        if not body:
+            continue
+        anchored = anchored or "/" in body
+        if anchored:
+            match = _seg_match(body.split("/"), rel_segs)
+        else:
+            match = any(fnmatch.fnmatchcase(seg, body) for seg in rel_segs)
+        if match and not (dir_only and not is_dir):
+            # A dir-only pattern ignores only directories; when a matched
+            # dir is pruned in os.walk its contents vanish with it.
+            ignored = not neg
+    return ignored
+
+
+def _parse_exclude(exclude: str | None) -> list[str]:
+    """Split a comma-separated `--exclude` string into clean patterns."""
+    if not exclude:
+        return []
+    return [p.strip() for p in exclude.split(",") if p.strip()]
+
+
+def _excluded(patterns: list[str], rel_path: str) -> bool:
+    """True when `rel_path` (posix-style, relative to the scan root) matches
+    any user-supplied exclude pattern. Patterns with `/` are matched against
+    the full relative path (segment-wise, `*` never crosses `/`, `**` may);
+    bare patterns match any path segment. Directory matches cascade because
+    matched dirs are pruned from `os.walk`."""
+    rel = rel_path.replace(os.sep, "/")
+    rel_segs = rel.split("/")
+    for pat in patterns:
+        if "/" in pat:
+            if _seg_match(pat.split("/"), rel_segs):
+                return True
+        elif any(fnmatch.fnmatchcase(seg, pat) for seg in rel_segs):
+            return True
+    return False
+
+
 def _line_windows(line: str):
     """Yield the scan window(s) for a line: the whole line, or overlapping
     chunks when it exceeds LONG_LINE_WINDOW."""
@@ -162,28 +252,63 @@ def _mask(secret: str) -> str:
 
 
 @mcp.tool()
-def scan_secrets(path: str, max_findings: int = 200) -> str:
+def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
     Args:
         path: File or directory to scan.
         max_findings: Stop after this many findings (default 200).
+        exclude: Optional comma-separated glob patterns for noisy paths
+            (e.g. `"*.min.js,fixtures/*"`); matching files and directories
+            are skipped on top of `.gitignore` and the built-in ignore dirs.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
         masked preview. Values are masked so the report is safe to share.
+        When scanning a directory, a `.gitignore` at the scan root is
+        honoured (basename/dir/negation patterns); ignored paths are not
+        counted as scanned.
     """
     if not os.path.exists(path):
         return f"Error: path does not exist: {path}"
 
+    exclude_patterns = _parse_exclude(exclude)
+
     files = []
     if os.path.isfile(path):
-        files = [path]
+        # A single file still honours a .gitignore at its own directory.
+        scan_root = os.path.dirname(os.path.abspath(path))
+        patterns = _load_gitignore(scan_root)
+        base = os.path.basename(path)
+        if not _gitignore_ignored(patterns, base, False) and not _excluded(
+            exclude_patterns, base
+        ):
+            files = [path]
     else:
+        scan_root = os.path.abspath(path)
+        patterns = _load_gitignore(scan_root)
         for root, dirs, names in os.walk(path):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in IGNORE_DIRS
+                and not _gitignore_ignored(
+                    patterns,
+                    os.path.relpath(os.path.join(root, d), scan_root),
+                    True,
+                )
+                and not _excluded(
+                    exclude_patterns,
+                    os.path.relpath(os.path.join(root, d), scan_root),
+                )
+            ]
             for n in names:
                 if os.path.splitext(n)[1].lower() in SKIP_EXTS:
+                    continue
+                rel = os.path.relpath(os.path.join(root, n), scan_root)
+                if _gitignore_ignored(patterns, rel, False):
+                    continue
+                if _excluded(exclude_patterns, rel):
                     continue
                 files.append(os.path.join(root, n))
 
