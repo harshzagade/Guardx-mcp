@@ -6,6 +6,25 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: honours a `.gitignore` at the scan root — basename
+  patterns match at any depth, patterns with an interior/leading `/` are
+  root-anchored, trailing `/` restricts to directories, `!` negates, and
+  the last matching pattern wins; matched directories are pruned from the
+  walk so their contents are never read. Applies to directory scans and to
+  single-file scans (via the file's own directory).
+- `tests/test_gitignore.py`: 13 unit tests (blank/comment lines ignored,
+  basename wildcards at any depth, dir pruning, nested-dir matching,
+  root-anchored vs bare trailing-slash patterns, `!` negation, last-match
+  wins, `**` spanning, hard-coded dirs still applied, single-file honoring).
+- `scan_secrets`: `exclude` parameter — comma-separated glob patterns for
+  noisy paths (e.g. `"*.min.js,fixtures/*"`); bare patterns match any path
+  segment, patterns with `/` are path-anchored, matched directories are
+  pruned from the walk. Stacks on top of `.gitignore` and the built-in
+  ignore dirs.
+- `tests/test_gitignore.py`: 7 unit tests for `--exclude` semantics (bare
+  pattern at any depth, path-anchored `fixtures/*`, comma-separated list,
+  dir pruning, empty string no-op, single-file exclusion, stacking with
+  `.gitignore`). Full suite: 43 green.
 - `scan_secrets`: long lines are now scanned with a sliding window instead
   of being skipped — minified bundles are chunked into overlapping
   2000-char windows (1500-char stride), so secrets buried past the old

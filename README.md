@@ -271,7 +271,7 @@ A password not found in any breach returns `Good news: this password was NOT fou
 
 | Tool | Signature | Description |
 | --- | --- | --- |
-| **Secret scanner** | `scan_secrets(path, max_findings=200)` | Recursively scans a file or directory for hardcoded secrets. Skips binaries and common ignore dirs (`.git`, `node_modules`, …). Long minified lines are scanned in overlapping windows instead of being skipped. Findings are graded HIGH/MED/LOW and the report header carries per-severity counts; values are masked so reports are safe to share. |
+| **Secret scanner** | `scan_secrets(path, max_findings=200, exclude=None)` | Recursively scans a file or directory for hardcoded secrets. Skips binaries and common ignore dirs (`.git`, `node_modules`, …), and honours a `.gitignore` at the scan root (basename patterns at any depth, root-anchored patterns, trailing-slash dir patterns, `!` negations — last match wins). A comma-separated `exclude` glob list (e.g. `"*.min.js,fixtures/*"`) skips extra noisy paths on top. Long minified lines are scanned in overlapping windows instead of being skipped. Findings are graded HIGH/MED/LOW and the report header carries per-severity counts; values are masked so reports are safe to share. |
 | **Dependency auditor** | `audit_dependencies(path)` | Parses a `requirements.txt` or `package.json` and checks each pinned dependency against OSV.dev. Returns CVE/GHSA ids and summaries. |
 | **Pwned-password check** | `check_pwned_password(password)` | Checks a password against HIBP via k-anonymity. Reports breach count without transmitting the password. |
 
@@ -281,7 +281,9 @@ A password not found in any breach returns `Good news: this password was NOT fou
 guardx-mcp/
 ├── server.py          # MCP server + the three tools
 ├── tests/             # pytest suite (stdlib-only, no extra installs)
-│   └── test_pwned_password.py
+│   ├── test_scan_secrets.py
+│   ├── test_pwned_password.py
+│   └── test_gitignore.py
 ├── requirements.txt   # runtime dependencies (mcp, httpx)
 ├── assets/            # README screenshots
 ├── README.md
