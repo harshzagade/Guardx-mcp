@@ -39,7 +39,7 @@ Unlike offensive recon tools that probe live websites, this server inspects **yo
 ## Features
 
 - 🔑 **Secret scanning** — detect hardcoded AWS keys, GitHub/Slack tokens, private keys, JWTs, and generic credentials. Findings are **masked**, so reports are safe to share.
-- 📦 **Dependency auditing** — check `requirements.txt` (PyPI) and `package.json` (npm) against the free [OSV.dev](https://osv.dev) vulnerability database.
+- 📦 **Dependency auditing** — check `requirements.txt` (PyPI), `package.json` (npm), and `go.mod` (Go modules) against the free [OSV.dev](https://osv.dev) vulnerability database.
 - 🔐 **Breached-password check** — query [Have I Been Pwned](https://haveibeenpwned.com/Passwords) using **k-anonymity**; the password never leaves your machine.
 - 🚫 **No API keys, no accounts** — clone, install, run.
 - 🤖 **Native MCP** — works with Claude Code, Claude Desktop, Gemini CLI, OpenAI Codex, Cursor, and any MCP client.
@@ -272,7 +272,7 @@ A password not found in any breach returns `Good news: this password was NOT fou
 | Tool | Signature | Description |
 | --- | --- | --- |
 | **Secret scanner** | `scan_secrets(path, max_findings=200, exclude=None)` | Recursively scans a file or directory for hardcoded secrets. Skips binaries and common ignore dirs (`.git`, `node_modules`, …), and honours a `.gitignore` at the scan root (basename patterns at any depth, root-anchored patterns, trailing-slash dir patterns, `!` negations — last match wins). A comma-separated `exclude` glob list (e.g. `"*.min.js,fixtures/*"`) skips extra noisy paths on top. Long minified lines are scanned in overlapping windows instead of being skipped. Findings are graded HIGH/MED/LOW and the report header carries per-severity counts; values are masked so reports are safe to share. |
-| **Dependency auditor** | `audit_dependencies(path)` | Parses a `requirements.txt` or `package.json` and checks each pinned dependency against OSV.dev. Returns CVE/GHSA ids and summaries. |
+| **Dependency auditor** | `audit_dependencies(path)` | Parses a `requirements.txt`, `package.json`, or `go.mod` and checks each pinned dependency against OSV.dev. Returns CVE/GHSA ids and summaries. |
 | **Pwned-password check** | `check_pwned_password(password)` | Checks a password against HIBP via k-anonymity. Reports breach count without transmitting the password. |
 
 ## Project Structure
@@ -303,7 +303,7 @@ guardx-mcp/
 ## Contributing
 
 Contributions are welcome! Ideas: more secret patterns, additional ecosystems
-(Go modules, Cargo, Maven), or an SBOM export. Please keep all contributions
+(Cargo, Maven), or an SBOM export. Please keep all contributions
 **defensive** in nature. Open an issue or a pull request.
 
 ## License

@@ -15,6 +15,16 @@ actual git history — no invented features.
 - `tests/test_osv_backoff.py`: 10 unit tests (Retry-After honored, backoff
   fallback, 60s clamp, malformed header, give-up after max attempts,
   non-429 failure fast-path, network-error path, end-to-end audit retry).
+- `audit_dependencies`: Go module support — `go.mod` manifests are now
+  audited against OSV's Go ecosystem. Both block-form and single-line
+  `require` directives are parsed (versions keep their `v` prefix, which
+  OSV normalises); other directives (`replace`, `retract`, `exclude`,
+  ...) are ignored. README feature list, tool reference, and
+  contributing notes updated.
+- `tests/test_go_mod.py`: 9 unit tests (block/single-line parsing,
+  `// indirect` comment stripping, directive exclusion, empty files,
+  `v`-prefix retention, Go-ecosystem query payloads, end-to-end vuln
+  report, unsupported-manifest message).
 - `scan_secrets`: honours a `.gitignore` at the scan root — basename
   patterns match at any depth, patterns with an interior/leading `/` are
   root-anchored, trailing `/` restricts to directories, `!` negates, and

@@ -404,6 +404,44 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return float(seconds) if seconds >= 0 else None
 
 
+def _parse_go_mod(text: str):
+    """Yield (module, version) for `require` entries in a go.mod file.
+
+    Handles both the block form::
+
+        require (
+            example.com/mod v1.2.3
+            example.com/other v0.4.0 // indirect
+        )
+
+    and the single-line form (`require example.com/mod v1.2.3`).
+    Versions keep their leading `v` — OSV's Go ecosystem normalises it.
+    Only pinned module versions are reported; other directives
+    (`module`, `go`, `replace`, `retract`, `exclude`, ...) are ignored.
+    """
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if in_block:
+            if line == ")":
+                in_block = False
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0][0].isalnum():
+                yield parts[0], parts[1]
+            continue
+        if line.startswith("require"):
+            rest = line[len("require"):].strip()
+            if rest.startswith("("):
+                in_block = True
+                continue
+            parts = rest.split()
+            if len(parts) >= 2 and parts[0][0].isalnum():
+                yield parts[0], parts[1]
+
+
 async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosystem: str):
     payload = {"version": version, "package": {"name": name, "ecosystem": ecosystem}}
     attempt = 0
@@ -430,11 +468,11 @@ async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosyst
 async def audit_dependencies(path: str) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
 
-    Supports Python (requirements.txt) and npm (package.json). Only
-    pinned/exact versions are checked.
+    Supports Python (requirements.txt), npm (package.json), and Go
+    modules (go.mod). Only pinned/exact versions are checked.
 
     Args:
-        path: Path to a requirements.txt or package.json file.
+        path: Path to a requirements.txt, package.json, or go.mod file.
 
     Returns:
         A report of known vulnerabilities (OSV/CVE ids and summaries).
@@ -449,19 +487,23 @@ async def audit_dependencies(path: str) -> str:
     if name_lower.endswith("package.json"):
         ecosystem = "npm"
         deps = list(_parse_package_json(text))
+    elif name_lower == "go.mod":
+        ecosystem = "Go"
+        deps = list(_parse_go_mod(text))
     elif "requirements" in name_lower or name_lower.endswith(".txt"):
         ecosystem = "PyPI"
         deps = list(_parse_requirements(text))
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
-            "Provide a requirements.txt or package.json."
+            "Provide a requirements.txt, package.json, or go.mod."
         )
 
     if not deps:
         return (
             f"No pinned dependencies found in {path}. "
-            "(Only exact versions like 'pkg==1.2.3' or npm \"1.2.3\" are checked.)"
+            '(Only exact versions are checked: "pkg==1.2.3" for pip, '
+            '"1.2.3" for npm, or a go.mod require line.)'
         )
 
     deps = deps[:MAX_DEPS]
