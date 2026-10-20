@@ -6,6 +6,15 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: OSV rate-limit backoff — HTTP 429 responses from
+  OSV.dev are now retried (up to 3 retries per package) instead of being
+  reported as lookup failures. A `Retry-After` response header is honored
+  (delta-seconds form, clamped to 60s; the HTTP-date form falls back to
+  the exponential 1s/2s/4s backoff), so a rate-limited burst no longer
+  blanks the whole report.
+- `tests/test_osv_backoff.py`: 10 unit tests (Retry-After honored, backoff
+  fallback, 60s clamp, malformed header, give-up after max attempts,
+  non-429 failure fast-path, network-error path, end-to-end audit retry).
 - `scan_secrets`: honours a `.gitignore` at the scan root — basename
   patterns match at any depth, patterns with an interior/leading `/` are
   root-anchored, trailing `/` restricts to directories, `!` negates, and

@@ -23,6 +23,7 @@ import fnmatch
 import os
 import re
 import json
+import asyncio
 import hashlib
 
 import httpx
@@ -361,6 +362,8 @@ def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None)
 
 OSV_QUERY = "https://api.osv.dev/v1/query"
 MAX_DEPS = 100
+OSV_MAX_ATTEMPTS = 4  # initial try + up to 3 retries on HTTP 429
+OSV_MAX_RETRY_WAIT = 60.0  # never wait longer than this per retry
 
 
 def _parse_requirements(text: str):
@@ -387,16 +390,40 @@ def _parse_package_json(text: str):
                 yield name, cleaned
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse a `Retry-After` header value into seconds (delta-seconds form
+    only); return None when absent, non-numeric, or negative. The HTTP-date
+    form is deliberately not parsed — a date is useless without trusting the
+    server clock."""
+    if value is None:
+        return None
+    try:
+        seconds = int(str(value).strip())
+    except ValueError:
+        return None
+    return float(seconds) if seconds >= 0 else None
+
+
 async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosystem: str):
     payload = {"version": version, "package": {"name": name, "ecosystem": ecosystem}}
-    try:
-        resp = await client.post(OSV_QUERY, json=payload)
-    except httpx.RequestError:
-        return name, version, None
-    if resp.status_code != 200:
-        return name, version, None
-    vulns = resp.json().get("vulns", [])
-    return name, version, vulns
+    attempt = 0
+    while True:
+        try:
+            resp = await client.post(OSV_QUERY, json=payload)
+        except httpx.RequestError:
+            return name, version, None
+        if resp.status_code != 200:
+            attempt += 1
+            if resp.status_code != 429 or attempt >= OSV_MAX_ATTEMPTS:
+                return name, version, None
+            # Honor Retry-After when present, else exponential backoff
+            # (1s, 2s, 4s), clamped so one bad header can't stall the scan.
+            retry_after = _retry_after_seconds(resp.headers.get("retry-after"))
+            wait = retry_after if retry_after is not None else 2.0 ** (attempt - 1)
+            await asyncio.sleep(min(wait, OSV_MAX_RETRY_WAIT))
+            continue
+        vulns = resp.json().get("vulns", [])
+        return name, version, vulns
 
 
 @mcp.tool()
@@ -439,7 +466,6 @@ async def audit_dependencies(path: str) -> str:
 
     deps = deps[:MAX_DEPS]
 
-    import asyncio
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}
     ) as client:
