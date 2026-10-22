@@ -15,6 +15,14 @@ actual git history — no invented features.
 - `tests/test_scan_secrets.py`: 5 unit tests (same secret in two files /
   twice in one file counts once, different secrets each count, masked
   previews are not the dedup key, clean scan reports zero).
+- `scan_secrets`: `json_output` parameter — returns the report as
+  machine-readable JSON instead of text (for CI pipelines): the path,
+  files scanned, finding count, unique-secrets count, per-severity
+  counts, and a findings array of {file, line, type, severity, match}
+  with masked previews; path errors become {"error": ...} objects.
+- `tests/test_scan_secrets.py`: 6 unit tests (valid JSON shape, masked
+  previews never leak raw values, dedup count in JSON, clean-scan JSON,
+  error-as-JSON, default output still text).
 - `audit_dependencies`: OSV rate-limit backoff — HTTP 429 responses from
   OSV.dev are now retried (up to 3 retries per package) instead of being
   reported as lookup failures. A `Retry-After` response header is honored

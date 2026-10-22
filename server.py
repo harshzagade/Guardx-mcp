@@ -252,8 +252,39 @@ def _mask(secret: str) -> str:
     return f"{secret[:4]}...{secret[-2:]} (len {len(secret)})"
 
 
+def _report_json(path, scanned, findings, unique, sev_counts):
+    """Build the machine-readable `scan_secrets` report dict.
+
+    Finding previews are masked with the same `_mask()` used by the text
+    report, so the JSON is safe to store in CI logs.
+    """
+    return {
+        "tool": "scan_secrets",
+        "path": path,
+        "files_scanned": scanned,
+        "findings_count": len(findings),
+        "unique_secrets": unique,
+        "severity_counts": dict(sev_counts),
+        "findings": [
+            {
+                "file": f["file"],
+                "line": f["line"],
+                "type": f["type"],
+                "severity": f["severity"],
+                "match": _mask(f["secret"]),
+            }
+            for f in findings
+        ],
+    }
+
+
 @mcp.tool()
-def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None) -> str:
+def scan_secrets(
+    path: str,
+    max_findings: int = 200,
+    exclude: str | None = None,
+    json_output: bool = False,
+) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
     Args:
@@ -262,6 +293,13 @@ def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None)
         exclude: Optional comma-separated glob patterns for noisy paths
             (e.g. `"*.min.js,fixtures/*"`); matching files and directories
             are skipped on top of `.gitignore` and the built-in ignore dirs.
+        json_output: Return the report as machine-readable JSON instead of
+            human-readable text (for CI pipelines). The JSON object carries
+            the path, files scanned, finding count, unique-secrets count,
+            per-severity counts, and a findings array of
+            {file, line, type, severity, match} — previews are masked
+            exactly like the text report. Errors are returned as
+            {"error": ...} objects instead of plain "Error: ..." strings.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -275,6 +313,9 @@ def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None)
         as scanned.
     """
     if not os.path.exists(path):
+        if json_output:
+            return json.dumps({"tool": "scan_secrets", "path": path,
+                               "error": f"path does not exist: {path}"})
         return f"Error: path does not exist: {path}"
 
     exclude_patterns = _parse_exclude(exclude)
@@ -362,7 +403,13 @@ def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None)
         f"Unique secrets: {unique}"
     )
     if not findings:
+        if json_output:
+            return json.dumps(_report_json(path, scanned, findings,
+                                           unique, sev_counts))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
+    if json_output:
+        return json.dumps(_report_json(path, scanned, findings,
+                                       unique, sev_counts), indent=2)
     rendered = "\n\n".join(
         f"  [{f['severity']}] {f['type']}\n"
         f"      {f['file']}:{f['line']}\n"

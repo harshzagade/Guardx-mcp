@@ -271,3 +271,63 @@ class TestSecretDedup:
         report = server.scan_secrets(fp)
         assert "Unique secrets: 0" in report
         assert "No hardcoded secrets detected. [OK]" in report
+
+
+# ---------------------------------------------------------------------------
+# JSON output mode
+# ---------------------------------------------------------------------------
+
+class TestJSONOutput:
+    def test_json_mode_is_valid_json(self, tmp_path):
+        import json as jsonlib
+        fp = _write(tmp_path, "app.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        payload = jsonlib.loads(server.scan_secrets(fp, json_output=True))
+        assert payload["tool"] == "scan_secrets"
+        assert payload["path"] == fp
+        assert payload["files_scanned"] == 1
+        assert payload["findings_count"] == 1
+        assert payload["unique_secrets"] == 1
+        assert payload["severity_counts"] == {"HIGH": 1, "MED": 0, "LOW": 0}
+
+    def test_json_findings_carry_masked_preview(self, tmp_path):
+        import json as jsonlib
+        secret = "ghp_" + "1" * 36
+        fp = _write(tmp_path, "app.py", f'TOKEN = "{secret}"\n')
+        payload = jsonlib.loads(server.scan_secrets(fp, json_output=True))
+        finding = payload["findings"][0]
+        assert finding["file"] == fp
+        assert finding["line"] == 1
+        assert finding["type"] == "GitHub Token"
+        assert finding["severity"] == "HIGH"
+        assert secret not in jsonlib.dumps(payload)  # raw value never leaks
+        assert finding["match"] == server._mask(secret)
+
+    def test_json_mode_includes_dedup_count(self, tmp_path):
+        import json as jsonlib
+        secret = "ghp_" + "2" * 36
+        _write(tmp_path, "a.py", f'A = "{secret}"\n')
+        _write(tmp_path, "b.py", f'B = "{secret}"\n')
+        payload = jsonlib.loads(
+            server.scan_secrets(str(tmp_path), json_output=True)
+        )
+        assert payload["findings_count"] == 2
+        assert payload["unique_secrets"] == 1
+
+    def test_json_clean_scan_is_valid_json(self, tmp_path):
+        import json as jsonlib
+        fp = _write(tmp_path, "clean.py", 'print("hello world")\n')
+        payload = jsonlib.loads(server.scan_secrets(fp, json_output=True))
+        assert payload["findings"] == []
+        assert payload["findings_count"] == 0
+        assert payload["unique_secrets"] == 0
+
+    def test_json_error_is_a_json_object(self, tmp_path):
+        import json as jsonlib
+        missing = str(tmp_path / "nope.py")
+        payload = jsonlib.loads(server.scan_secrets(missing, json_output=True))
+        assert payload["error"] == f"path does not exist: {missing}"
+
+    def test_default_output_is_still_text(self, tmp_path):
+        fp = _write(tmp_path, "app.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        report = server.scan_secrets(fp)
+        assert report.startswith("Secret scan of")
