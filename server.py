@@ -266,9 +266,13 @@ def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None)
     Returns:
         A report of likely secrets with file, line number, type, and a
         masked preview. Values are masked so the report is safe to share.
-        When scanning a directory, a `.gitignore` at the scan root is
-        honoured (basename/dir/negation patterns); ignored paths are not
-        counted as scanned.
+        The header carries per-severity counts plus a "Unique secrets"
+        count — the number of distinct secret values across the whole
+        scan, so a key committed in twelve files shows as one unique
+        secret rather than twelve independent findings. When scanning a
+        directory, a `.gitignore` at the scan root is honoured
+        (basename/dir/negation patterns); ignored paths are not counted
+        as scanned.
     """
     if not os.path.exists(path):
         return f"Error: path does not exist: {path}"
@@ -332,28 +336,44 @@ def scan_secrets(path: str, max_findings: int = 200, exclude: str | None = None)
                 name, severity, secret = hit
                 sev_counts[severity] += 1
                 findings.append(
-                    f"  [{severity}] {name}\n"
-                    f"      {fp}:{lineno}\n"
-                    f"      match: {_mask(secret)}"
+                    {
+                        "file": fp,
+                        "line": lineno,
+                        "type": name,
+                        "severity": severity,
+                        "secret": secret,
+                    }
                 )
             if len(findings) >= max_findings:
                 break
         if len(findings) >= max_findings:
             break
 
+    # Repo-wide dedup: one committed key checked into many files is still
+    # one secret. Compare raw values (never the masked previews) so a
+    # value is counted once even when it shows up in several places.
+    unique = len({f["secret"] for f in findings})
+
     sev_summary = ", ".join(f"{s}: {sev_counts[s]}" for s in ("HIGH", "MED", "LOW"))
     header = (
         f"Secret scan of {path}\n"
         f"Files scanned: {scanned}\n"
-        f"Findings: {len(findings)} ({sev_summary})"
+        f"Findings: {len(findings)} ({sev_summary})\n"
+        f"Unique secrets: {unique}"
     )
     if not findings:
         return header + "\n\nNo hardcoded secrets detected. [OK]"
+    rendered = "\n\n".join(
+        f"  [{f['severity']}] {f['type']}\n"
+        f"      {f['file']}:{f['line']}\n"
+        f"      match: {_mask(f['secret'])}"
+        for f in findings
+    )
     note = (
         "\n\nNote: these are heuristic matches and may include false positives. "
         "Rotate any real secret that is committed to source control."
     )
-    return header + "\n\n" + "\n\n".join(findings) + note
+    return header + "\n\n" + rendered + note
 
 
 # ---------------------------------------------------------------------------

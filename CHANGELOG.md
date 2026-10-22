@@ -6,6 +6,15 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: repo-wide secret dedup — the report header now carries a
+  "Unique secrets" count (distinct secret values across the whole scan),
+  so a key committed in many files is reported once per location but
+  counts as one unique secret. Deduplication compares raw values, not
+  masked previews, and per-file findings are unchanged. The clean-scan
+  header reports `Unique secrets: 0`.
+- `tests/test_scan_secrets.py`: 5 unit tests (same secret in two files /
+  twice in one file counts once, different secrets each count, masked
+  previews are not the dedup key, clean scan reports zero).
 - `audit_dependencies`: OSV rate-limit backoff — HTTP 429 responses from
   OSV.dev are now retried (up to 3 retries per package) instead of being
   reported as lookup failures. A `Retry-After` response header is honored

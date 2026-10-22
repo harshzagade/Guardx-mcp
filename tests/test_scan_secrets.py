@@ -216,3 +216,58 @@ class TestLongLineSlidingWindow:
     def test_short_lines_use_single_window(self):
         line = "short line\n"
         assert list(server._line_windows(line)) == [line]
+
+
+# ---------------------------------------------------------------------------
+# Repo-wide secret dedup
+# ---------------------------------------------------------------------------
+
+class TestSecretDedup:
+    def test_same_secret_in_two_files_counts_once(self, tmp_path):
+        secret = "ghp_" + "e" * 36
+        _write(tmp_path, "a.py", f'TOKEN = "{secret}"\n')
+        _write(tmp_path, "b.py", f'API_KEY = "{secret}"\n')
+        report = server.scan_secrets(str(tmp_path))
+        assert "Findings: 2 (HIGH: 2, MED: 0, LOW: 0)" in report
+        assert "Unique secrets: 1" in report
+        # Per-file reporting is preserved: both occurrences are still shown.
+        assert "a.py:1" in report
+        assert "b.py:1" in report
+
+    def test_same_secret_twice_in_one_file_counts_once(self, tmp_path):
+        secret = "ghp_" + "f" * 36
+        fp = _write(
+            tmp_path, "a.py",
+            f'TOKEN = "{secret}"\nKEY = "{secret}"\n',
+        )
+        report = server.scan_secrets(fp)
+        assert "Findings: 2" in report
+        assert "Unique secrets: 1" in report
+
+    def test_different_secrets_each_count(self, tmp_path):
+        _write(
+            tmp_path, "a.py",
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+            'GH_TOKEN = "ghp_' + "a" * 36 + '"\n'
+        )
+        report = server.scan_secrets(str(tmp_path))
+        assert "Findings: 2" in report
+        assert "Unique secrets: 2" in report
+
+    def test_dedup_compares_raw_values_not_masked_previews(self, tmp_path):
+        # Two secrets sharing the same first 4 / last 2 characters (and
+        # length) have identical masked previews; they must still count
+        # as two secrets.
+        s1 = "ghp_" + "a" * 34 + "ZZ"
+        s2 = "ghp_" + "b" * 34 + "ZZ"
+        assert server._mask(s1) == server._mask(s2)
+        _write(tmp_path, "a.py", f'A = "{s1}"\n')
+        _write(tmp_path, "b.py", f'B = "{s2}"\n')
+        report = server.scan_secrets(str(tmp_path))
+        assert "Unique secrets: 2" in report
+
+    def test_clean_scan_shows_zero_unique(self, tmp_path):
+        fp = _write(tmp_path, "clean.py", 'print("hello world")\n')
+        report = server.scan_secrets(fp)
+        assert "Unique secrets: 0" in report
+        assert "No hardcoded secrets detected. [OK]" in report
