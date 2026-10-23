@@ -6,6 +6,14 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `tests/test_pattern_suite.py`: true-positive / false-positive coverage for
+  the entire `scan_secrets` pattern suite — every one of the 14 patterns in
+  `SECRET_PATTERNS` now has realistic true-positive lines (asserting the
+  pattern fires with the right name and severity) and near-miss
+  false-positive lines (asserting the whole line is clean, so each case
+  also guards the other patterns against over-matching). A meta-test
+  asserts the case table covers all 14 patterns, so a future pattern added
+  without cases fails the suite.
 - `scan_secrets`: repo-wide secret dedup — the report header now carries a
   "Unique secrets" count (distinct secret values across the whole scan),
   so a key committed in many files is reported once per location but
