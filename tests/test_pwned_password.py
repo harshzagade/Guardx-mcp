@@ -190,12 +190,61 @@ def test_network_failure_reports_gracefully(monkeypatch):
     def handler(url):
         raise sys.modules["httpx"].RequestError("boom")
 
+    # zero the backoff so the test stays fast
+    monkeypatch.setattr(guardx.random, "uniform", lambda a, b: 0.0)
     patch_client(monkeypatch, handler)
     out = run(guardx.check_pwned_password("anything"))
     assert out.startswith("Error: could not reach HIBP")
+    # one initial attempt + 2 retries
+    assert len(FakeClient.seen[0].requests) == 3
 
 
-def test_non_200_status_reports_http_code(monkeypatch):
+def test_transient_failure_retries_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(url):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise sys.modules["httpx"].RequestError("flaky network")
+        return FakeResponse(text="")
+
+    monkeypatch.setattr(guardx.random, "uniform", lambda a, b: 0.0)
+    patch_client(monkeypatch, handler)
+    out = run(guardx.check_pwned_password("flaky-network-password"))
+    assert "NOT found in any known breach" in out
+    assert len(FakeClient.seen[0].requests) == 3
+
+
+def test_gives_up_after_two_retries(monkeypatch):
+    def handler(url):
+        raise sys.modules["httpx"].RequestError("down")
+
+    monkeypatch.setattr(guardx.random, "uniform", lambda a, b: 0.0)
+    patch_client(monkeypatch, handler)
+    out = run(guardx.check_pwned_password("anything"))
+    assert out.startswith("Error: could not reach HIBP")
+    assert len(FakeClient.seen[0].requests) == 3
+
+
+def test_retry_backoff_is_jittered_and_grows(monkeypatch):
+    seen = []
+
+    def fake_uniform(a, b):
+        seen.append((a, b))
+        return 0.0
+
+    monkeypatch.setattr(guardx.random, "uniform", fake_uniform)
+
+    def handler(url):
+        raise sys.modules["httpx"].RequestError("down")
+
+    patch_client(monkeypatch, handler)
+    run(guardx.check_pwned_password("anything"))
+    # full jitter, growing ceiling: uniform(0, 1) then uniform(0, 2)
+    assert seen == [(0, 1), (0, 2)]
+
+
+def test_non_200_status_is_not_retried(monkeypatch):
     patch_client(monkeypatch, lambda url: FakeResponse(status_code=503))
     out = run(guardx.check_pwned_password("anything"))
     assert out == "HIBP returned HTTP 503."

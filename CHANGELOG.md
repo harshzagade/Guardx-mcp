@@ -14,6 +14,15 @@ actual git history — no invented features.
   also guards the other patterns against over-matching). A meta-test
   asserts the case table covers all 14 patterns, so a future pattern added
   without cases fails the suite.
+- `check_pwned_password`: retry transient network failures — an
+  `httpx.RequestError` now retries twice (initial attempt + 2 retries) with
+  full-jitter backoff (`random.uniform(0, 1)` then `random.uniform(0, 2)`
+  seconds) before reporting the error. HTTP error statuses are not
+  retried. Docstring documents the retry behavior.
+- `tests/test_pwned_password.py`: 3 new unit tests (flaky-then-success,
+  give-up after two retries, jittered growing backoff); the network-failure
+  test now also asserts the 3-attempt count and zeroes the backoff so the
+  suite stays fast.
 - `scan_secrets`: repo-wide secret dedup — the report header now carries a
   "Unique secrets" count (distinct secret values across the whole scan),
   so a key committed in many files is reported once per location but

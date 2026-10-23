@@ -25,6 +25,7 @@ import re
 import json
 import asyncio
 import hashlib
+import random
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -621,6 +622,7 @@ async def audit_dependencies(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 HIBP_RANGE = "https://api.pwnedpasswords.com/range/"
+HIBP_MAX_ATTEMPTS = 3  # initial request + 2 retries on transient network failures
 
 
 @mcp.tool()
@@ -636,6 +638,9 @@ async def check_pwned_password(password: str) -> str:
 
     Returns:
         Whether the password was found in breaches and how many times.
+        Transient network failures (`httpx.RequestError`) are retried
+        twice with full-jitter backoff (up to 1s, then up to 2s) before
+        reporting an error; HTTP error statuses are not retried.
     """
     if not password:
         return "Error: empty password."
@@ -643,15 +648,25 @@ async def check_pwned_password(password: str) -> str:
     sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
     prefix, suffix = sha1[:5], sha1[5:]
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=HTTP_TIMEOUT,
-            headers={"User-Agent": USER_AGENT, "Add-Padding": "true"},
-        ) as client:
-            resp = await client.get(HIBP_RANGE + prefix)
-    except httpx.RequestError as exc:
-        return f"Error: could not reach HIBP ({exc.__class__.__name__}: {exc})."
+    resp = None
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": USER_AGENT, "Add-Padding": "true"},
+    ) as client:
+        for attempt in range(HIBP_MAX_ATTEMPTS):
+            try:
+                resp = await client.get(HIBP_RANGE + prefix)
+                break
+            except httpx.RequestError as exc:
+                if attempt == HIBP_MAX_ATTEMPTS - 1:
+                    return (
+                        f"Error: could not reach HIBP "
+                        f"({exc.__class__.__name__}: {exc})."
+                    )
+                # Transient network failure: full-jitter backoff before retrying.
+                await asyncio.sleep(random.uniform(0, 2 ** attempt))
 
+    # The loop either breaks with a response or returns the error above.
     if resp.status_code != 200:
         return f"HIBP returned HTTP {resp.status_code}."
 
