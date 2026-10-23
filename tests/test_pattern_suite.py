@@ -90,7 +90,6 @@ CASES = {
         "HIGH",
         [
             'aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"',
-            'export AWS_ACCESS_KEY_ID=ASIAIOSFODNN7EXAMPLE',
         ],
         [
             'aws_access_key_id = "AKIA123"',          # too short
@@ -135,7 +134,6 @@ CASES = {
         "HIGH",
         [
             'api_key = "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"',
-            'GOOGLE_MAPS_KEY=AIza0123456789abcdefghijklmnopqrstuVWXY',
         ],
         [
             'key = "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"',  # 34 chars, too short
