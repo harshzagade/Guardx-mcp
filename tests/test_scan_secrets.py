@@ -331,3 +331,65 @@ class TestJSONOutput:
         fp = _write(tmp_path, "app.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
         report = server.scan_secrets(fp)
         assert report.startswith("Secret scan of")
+
+
+# ---------------------------------------------------------------------------
+# Per-file finding counts in the report header
+# ---------------------------------------------------------------------------
+
+class TestPerFileCounts:
+    def test_header_lists_counts_per_file(self, tmp_path):
+        a = _write(
+            tmp_path, "a.py",
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+            'GH_TOKEN = "ghp_' + "a" * 36 + '"\n',
+        )
+        b = _write(tmp_path, "b.py", 'db_password = "hunter2-hunter2"\n')
+        report = server.scan_secrets(str(tmp_path))
+        assert "Per-file findings:" in report
+        assert f"  {a}: 2" in report
+        assert f"  {b}: 1" in report
+
+    def test_most_affected_file_listed_first(self, tmp_path):
+        _write(tmp_path, "a.py", 'db_password = "hunter2-hunter2"\n')
+        b = _write(
+            tmp_path, "b.py",
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+            'GH_TOKEN = "ghp_' + "c" * 36 + '"\n',
+        )
+        report = server.scan_secrets(str(tmp_path))
+        header_block = report.split("Per-file findings:")[1].split("\n\n")[0]
+        lines = [ln.strip() for ln in header_block.strip().splitlines()]
+        assert lines[0] == f"{b}: 2"
+        assert lines[1].endswith(": 1")
+
+    def test_clean_scan_has_no_per_file_block(self, tmp_path):
+        fp = _write(tmp_path, "clean.py", 'print("hello world")\n')
+        report = server.scan_secrets(fp)
+        assert "Per-file findings:" not in report
+        assert "Findings: 0" in report
+
+    def test_json_carries_per_file_counts(self, tmp_path):
+        import json as jsonlib
+        a = _write(tmp_path, "a.py", 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        _write(
+            tmp_path, "b.py",
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+            'GH_TOKEN = "ghp_' + "d" * 36 + '"\n',
+        )
+        payload = jsonlib.loads(
+            server.scan_secrets(str(tmp_path), json_output=True)
+        )
+        assert payload["per_file_counts"] == {a: 1, str(tmp_path / "b.py"): 2}
+        # JSON counts agree with the text header for the same scan.
+        report = server.scan_secrets(str(tmp_path))
+        assert f"  {a}: 1" in report
+
+    def test_single_file_scan_counts_that_file(self, tmp_path):
+        fp = _write(
+            tmp_path, "app.py",
+            'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+            'GH_TOKEN = "ghp_' + "e" * 36 + '"\n',
+        )
+        report = server.scan_secrets(fp)
+        assert f"  {fp}: 2" in report

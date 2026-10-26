@@ -26,6 +26,7 @@ import json
 import asyncio
 import hashlib
 import random
+from collections import Counter
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -253,6 +254,14 @@ def _mask(secret: str) -> str:
     return f"{secret[:4]}...{secret[-2:]} (len {len(secret)})"
 
 
+def _per_file_counts(findings) -> dict:
+    """Return {file: finding count} for a findings list, sorted by count
+    descending (most-affected file first) with filename as tie-break, so
+    triage starts where the findings cluster."""
+    counts = Counter(f["file"] for f in findings)
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def _report_json(path, scanned, findings, unique, sev_counts):
     """Build the machine-readable `scan_secrets` report dict.
 
@@ -266,6 +275,7 @@ def _report_json(path, scanned, findings, unique, sev_counts):
         "findings_count": len(findings),
         "unique_secrets": unique,
         "severity_counts": dict(sev_counts),
+        "per_file_counts": _per_file_counts(findings),
         "findings": [
             {
                 "file": f["file"],
@@ -297,7 +307,7 @@ def scan_secrets(
         json_output: Return the report as machine-readable JSON instead of
             human-readable text (for CI pipelines). The JSON object carries
             the path, files scanned, finding count, unique-secrets count,
-            per-severity counts, and a findings array of
+            per-severity counts, per-file finding counts, and a findings array of
             {file, line, type, severity, match} — previews are masked
             exactly like the text report. Errors are returned as
             {"error": ...} objects instead of plain "Error: ..." strings.
@@ -308,10 +318,14 @@ def scan_secrets(
         The header carries per-severity counts plus a "Unique secrets"
         count — the number of distinct secret values across the whole
         scan, so a key committed in twelve files shows as one unique
-        secret rather than twelve independent findings. When scanning a
-        directory, a `.gitignore` at the scan root is honoured
-        (basename/dir/negation patterns); ignored paths are not counted
-        as scanned.
+        secret rather than twelve independent findings. When findings
+        exist, the header also lists per-file finding counts
+        ("Per-file findings"), most-affected file first, so triage can
+        start where the findings cluster without counting the detail
+        section by hand; the same map appears as `per_file_counts` in
+        JSON output. When scanning a directory, a `.gitignore` at the
+        scan root is honoured (basename/dir/negation patterns); ignored
+        paths are not counted as scanned.
     """
     if not os.path.exists(path):
         if json_output:
@@ -403,6 +417,11 @@ def scan_secrets(
         f"Findings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
     )
+    if findings:
+        per_file = _per_file_counts(findings)
+        header += "\nPer-file findings:\n" + "\n".join(
+            f"  {fp}: {n}" for fp, n in per_file.items()
+        )
     if not findings:
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,

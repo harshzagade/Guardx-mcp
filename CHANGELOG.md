@@ -6,6 +6,15 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: per-file finding counts in the report header — when
+  findings exist, the header lists each affected file with its count
+  ("Per-file findings"), most-affected file first, so triage starts
+  where the findings cluster; the same map is exposed as
+  `per_file_counts` in `json_output` mode. Clean scans carry no
+  per-file block.
+- `tests/test_scan_secrets.py`: 5 unit tests (header lists per-file
+  counts, most-affected file first, clean scan has no block, JSON
+  `per_file_counts` agrees with the text header, single-file scan).
 - `tests/test_pattern_suite.py`: true-positive / false-positive coverage for
   the entire `scan_secrets` pattern suite — every one of the 14 patterns in
   `SECRET_PATTERNS` now has realistic true-positive lines (asserting the
