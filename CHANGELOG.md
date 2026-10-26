@@ -6,6 +6,18 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: entropy-based LOW findings — lines no known pattern
+  matches are checked for long high-entropy quoted strings (at least
+  20 characters, Shannon entropy at least 4.0 bits/char), reported as
+  "High-Entropy String" findings for custom token formats. Kept
+  separate from `_match_line` so the pattern suite's false-positive
+  cases stay valid; a known pattern always wins and the
+  one-finding-per-line rule is preserved. Plain English and pure hex
+  hashes stay below the threshold by design.
+- `tests/test_entropy.py`: 9 unit tests (custom token is LOW and
+  masked, helper/pattern separation, known-pattern precedence,
+  low-entropy / hex-hash / short / repeated strings stay clean, one
+  finding per line, JSON finding masked).
 - `scan_secrets`: per-file finding counts in the report header — when
   findings exist, the header lists each affected file with its count
   ("Per-file findings"), most-affected file first, so triage starts

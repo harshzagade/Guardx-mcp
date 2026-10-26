@@ -20,6 +20,7 @@ Use only on code and credentials you own or are authorized to assess.
 from __future__ import annotations
 
 import fnmatch
+import math
 import os
 import re
 import json
@@ -247,6 +248,44 @@ def _match_line(line: str):
     return None
 
 
+# Entropy fallback: catches custom token formats no known pattern covers.
+# A 20-char string can carry at most log2(20) ~= 4.32 bits/char, so the
+# 4.0 threshold with a 20-char floor only fires on genuinely mixed
+# alphabets; plain English (3.6-3.8) and pure hex hashes (3.4-3.7) stay
+# below it. Quoted strings only, and the charset excludes `:` and `/`
+# so URLs are not split into flaggable fragments.
+ENTROPY_MIN_LENGTH = 20
+ENTROPY_THRESHOLD = 4.0
+_QUOTED_TOKEN_RE = re.compile(r"""["']([A-Za-z0-9_+\-=.]{20,})["']""")
+
+
+def _shannon_entropy(text: str) -> float:
+    """Shannon entropy of `text` in bits per character."""
+    if not text:
+        return 0.0
+    counts = Counter(text)
+    n = len(text)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _entropy_hit(line: str):
+    """Return ("High-Entropy String", "LOW", candidate) for the first
+    quoted string in `line` that is long and high-entropy, or None.
+
+    Deliberately separate from `_match_line`: the pattern suite's
+    false-positive cases assert `_match_line` returns None, and entropy
+    is a LOW heuristic, not a pattern — `scan_secrets` only consults
+    this after the patterns miss, so a known pattern always wins and
+    the one-finding-per-line rule is preserved."""
+    for m in _QUOTED_TOKEN_RE.finditer(line):
+        candidate = m.group(1)
+        if len(candidate) >= ENTROPY_MIN_LENGTH and (
+            _shannon_entropy(candidate) >= ENTROPY_THRESHOLD
+        ):
+            return "High-Entropy String", "LOW", candidate
+    return None
+
+
 def _mask(secret: str) -> str:
     secret = secret.strip()
     if len(secret) <= 8:
@@ -323,7 +362,12 @@ def scan_secrets(
         ("Per-file findings"), most-affected file first, so triage can
         start where the findings cluster without counting the detail
         section by hand; the same map appears as `per_file_counts` in
-        JSON output. When scanning a directory, a `.gitignore` at the
+        JSON output. Lines no known pattern matches are also checked
+        for long high-entropy quoted strings (at least 20 characters,
+        Shannon entropy at least 4.0 bits/char), reported as LOW
+        "High-Entropy String" findings — a catch for custom token
+        formats; plain English and pure hex hashes stay below the
+        threshold. When scanning a directory, a `.gitignore` at the
         scan root is honoured (basename/dir/negation patterns); ignored
         paths are not counted as scanned.
     """
@@ -387,7 +431,7 @@ def scan_secrets(
         scanned += 1
 
         for lineno, line in enumerate(lines, start=1):
-            hit = _match_line(line)
+            hit = _match_line(line) or _entropy_hit(line)
             if hit:
                 name, severity, secret = hit
                 sev_counts[severity] += 1
