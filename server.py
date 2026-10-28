@@ -293,6 +293,43 @@ def _mask(secret: str) -> str:
     return f"{secret[:4]}...{secret[-2:]} (len {len(secret)})"
 
 
+BASELINE_FILENAME = ".guardx-baseline"
+
+
+def _finding_hash(rel_path: str, finding_type: str, secret: str) -> str:
+    """Stable identity for one finding, for baseline suppression.
+
+    The line number is deliberately excluded, so a finding stays
+    suppressed when surrounding lines are added or removed. The raw
+    secret never goes into the baseline file — only its SHA-256, so a
+    committed baseline does not leak the secret it acknowledges.
+    """
+    payload = f"{rel_path}\0{finding_type}\0{secret}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_baseline(baseline_path: str) -> set:
+    """Return the set of finding hashes in a baseline file.
+
+    One SHA-256 hex digest per line; blank lines, `#` comments, and
+    malformed lines are ignored so a hand-edited baseline cannot break
+    a scan.
+    """
+    try:
+        with open(baseline_path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return set()
+    hashes = set()
+    for raw in lines:
+        token = raw.strip().lower()
+        if not token or token.startswith("#"):
+            continue
+        if re.fullmatch(r"[0-9a-f]{64}", token):
+            hashes.add(token)
+    return hashes
+
+
 def _per_file_counts(findings) -> dict:
     """Return {file: finding count} for a findings list, sorted by count
     descending (most-affected file first) with filename as tie-break, so
@@ -301,7 +338,7 @@ def _per_file_counts(findings) -> dict:
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def _report_json(path, scanned, findings, unique, sev_counts):
+def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
@@ -315,6 +352,7 @@ def _report_json(path, scanned, findings, unique, sev_counts):
         "unique_secrets": unique,
         "severity_counts": dict(sev_counts),
         "per_file_counts": _per_file_counts(findings),
+        "suppressed_count": suppressed,
         "findings": [
             {
                 "file": f["file"],
@@ -334,6 +372,7 @@ def scan_secrets(
     max_findings: int = 200,
     exclude: str | None = None,
     json_output: bool = False,
+    baseline: str | None = None,
 ) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
@@ -350,6 +389,17 @@ def scan_secrets(
             {file, line, type, severity, match} — previews are masked
             exactly like the text report. Errors are returned as
             {"error": ...} objects instead of plain "Error: ..." strings.
+        baseline: Optional path to a baseline file. When omitted, a
+            `.guardx-baseline` file at the scan root (or next to a
+            single scanned file) is auto-discovered and applied. Each
+            line holds the SHA-256 hash of one acknowledged finding
+            (see `_finding_hash`); matching findings are suppressed
+            from the report and counted as "Suppressed" (and as
+            `suppressed_count` in JSON output) so CI runs stay green
+            on reviewed false positives without hiding new findings.
+            An explicitly given baseline path that does not exist is
+            an error; a missing auto-discovered file simply means no
+            suppression.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -411,14 +461,28 @@ def scan_secrets(
                 if os.path.splitext(n)[1].lower() in SKIP_EXTS:
                     continue
                 rel = os.path.relpath(os.path.join(root, n), scan_root)
+                if rel == BASELINE_FILENAME:
+                    continue
                 if _gitignore_ignored(patterns, rel, False):
                     continue
                 if _excluded(exclude_patterns, rel):
                     continue
                 files.append(os.path.join(root, n))
 
+    if baseline is not None:
+        if not os.path.isfile(baseline):
+            if json_output:
+                return json.dumps({"tool": "scan_secrets", "path": path,
+                                   "error": f"baseline does not exist: {baseline}"})
+            return f"Error: baseline does not exist: {baseline}"
+        baseline_hashes = _load_baseline(baseline)
+    else:
+        auto = os.path.join(scan_root, BASELINE_FILENAME)
+        baseline_hashes = _load_baseline(auto) if os.path.isfile(auto) else set()
+
     findings = []
     sev_counts = {"HIGH": 0, "MED": 0, "LOW": 0}
+    suppressed = 0
     scanned = 0
     for fp in files:
         try:
@@ -434,6 +498,10 @@ def scan_secrets(
             hit = _match_line(line) or _entropy_hit(line)
             if hit:
                 name, severity, secret = hit
+                rel = os.path.relpath(fp, scan_root)
+                if _finding_hash(rel, name, secret) in baseline_hashes:
+                    suppressed += 1
+                    continue
                 sev_counts[severity] += 1
                 findings.append(
                     {
@@ -461,6 +529,11 @@ def scan_secrets(
         f"Findings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
     )
+    if suppressed:
+        header += (
+            f"\nSuppressed: {suppressed} acknowledged finding(s) "
+            f"via {BASELINE_FILENAME}"
+        )
     if findings:
         per_file = _per_file_counts(findings)
         header += "\nPer-file findings:\n" + "\n".join(
@@ -469,11 +542,11 @@ def scan_secrets(
     if not findings:
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
-                                           unique, sev_counts))
+                                           unique, sev_counts, suppressed))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
-                                       unique, sev_counts), indent=2)
+                                       unique, sev_counts, suppressed), indent=2)
     rendered = "\n\n".join(
         f"  [{f['severity']}] {f['type']}\n"
         f"      {f['file']}:{f['line']}\n"

@@ -6,6 +6,21 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: `.guardx-baseline` allowlist — a baseline file at the
+  scan root (or an explicit `baseline=` path) suppresses acknowledged
+  findings by SHA-256 hash (relative path + finding type + secret
+  value; line numbers excluded so suppression survives edits, and the
+  raw secret never lands in the baseline file). Suppressed findings
+  are counted in the report header and as `suppressed_count` in JSON
+  output, so CI runs stay green on reviewed false positives while new
+  findings still surface. A missing explicit baseline path is an
+  error; a missing auto-discovered file means no suppression. The
+  baseline file itself is never scanned.
+- `tests/test_baseline.py`: 9 unit tests (suppression + count, unlisted
+  findings still reported, line-shift stability, JSON
+  `suppressed_count`, explicit path + missing-path error, comment /
+  blank / malformed line tolerance, no-baseline behaviour, single-file
+  scans, baseline file excluded from the scan).
 - `scan_secrets`: entropy-based LOW findings — lines no known pattern
   matches are checked for long high-entropy quoted strings (at least
   20 characters, Shannon entropy at least 4.0 bits/char), reported as
