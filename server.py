@@ -286,6 +286,64 @@ def _entropy_hit(line: str):
     return None
 
 
+# Config-file credential heuristic: in config files, a credential-named
+# key with a real-looking value is worth a MED finding even when no
+# known pattern matches — most often because the value is unquoted
+# (`.env`, YAML, INI) or the assignment uses `:` (YAML/JSON), both of
+# which the generic assignment pattern misses. Only the key's last
+# `-`/`_`/`/`-split token needs to be credential-like, so
+# `password_length` or `secret_santa` stay clean, and placeholder
+# values (changeme, ${VAR} references, masked ***) are skipped.
+_CONFIG_EXTS = {".ini", ".cfg", ".conf", ".yaml", ".yml", ".json",
+                ".toml", ".properties"}
+_CONFIG_CRED_TOKENS = {"password", "passwd", "pwd", "secret", "token",
+                        "apikey", "api_key", "accesskey", "privatekey",
+                        "auth", "credential"}
+_CONFIG_PLACEHOLDERS = {"changeme", "change-me", "example", "placeholder",
+                         "your-password", "your-secret", "your_api_key",
+                         "password", "secret", "token", "xxx", "none",
+                         "null", "true", "false"}
+_CONFIG_ASSIGN_RE = re.compile(
+    r"""^\s*(?:export\s+)?["']?([A-Za-z0-9_.\-]+)["']?\s*[:=]\s*"""
+    r"""["']?([^"'\s,;]+)["']?,?\s*$"""
+)
+
+
+def _is_config_file(filename: str) -> bool:
+    base = os.path.basename(filename)
+    if base == ".env" or base.startswith(".env."):
+        return True
+    return os.path.splitext(base)[1].lower() in _CONFIG_EXTS
+
+
+def _config_credential_hit(line: str, filename: str):
+    """Return ("Config Credential", "MED", value) for a credential-named
+    key with a non-placeholder value in a config file, or None.
+
+    Deliberately separate from `_match_line`: it only runs on config
+    files and only after the patterns miss, so code files are
+    unaffected and a known pattern always wins.
+    """
+    if not _is_config_file(filename):
+        return None
+    stripped = line.strip()
+    if not stripped or stripped[0] in "#;/" or stripped.startswith("//"):
+        return None
+    m = _CONFIG_ASSIGN_RE.match(stripped)
+    if not m:
+        return None
+    key, value = m.group(1).lower(), m.group(2)
+    tokens = re.split(r"[_.\-]", key)
+    if tokens[-1] not in _CONFIG_CRED_TOKENS:
+        return None
+    lowered = value.lower()
+    if (len(value) < 4 or lowered in _CONFIG_PLACEHOLDERS
+            or lowered.startswith("${") or lowered.startswith("<")
+            or set(value) <= set("*x")):
+        return None
+    return "Config Credential", "MED", value
+
+
 def _mask(secret: str) -> str:
     secret = secret.strip()
     if len(secret) <= 8:
@@ -495,7 +553,8 @@ def scan_secrets(
         scanned += 1
 
         for lineno, line in enumerate(lines, start=1):
-            hit = _match_line(line) or _entropy_hit(line)
+            hit = (_match_line(line) or _config_credential_hit(line, fp)
+                   or _entropy_hit(line))
             if hit:
                 name, severity, secret = hit
                 rel = os.path.relpath(fp, scan_root)

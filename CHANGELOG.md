@@ -21,6 +21,18 @@ actual git history — no invented features.
   `suppressed_count`, explicit path + missing-path error, comment /
   blank / malformed line tolerance, no-baseline behaviour, single-file
   scans, baseline file excluded from the scan).
+- `scan_secrets`: config-file credential heuristic — in `.env`, `.ini`,
+  YAML, JSON, TOML, and `.properties` files, a credential-named key
+  (last `-`/`_` split token `password`/`secret`/`token`/…) with a
+  non-placeholder value is a MED "Config Credential" finding, catching
+  unquoted values and `:` assignments the generic pattern misses.
+  Runs only after the known patterns miss, only in config files, and
+  skips placeholders (`changeme`, `${VAR}` references, masked values)
+  and non-credential names (`password_length`, `secret_santa`).
+- `tests/test_config_credentials.py`: 9 unit tests (.env / YAML / JSON /
+  INI positives, code-file exclusion, placeholder and reference
+  skipping, non-credential names clean, known-pattern precedence,
+  JSON masking).
 - `scan_secrets`: entropy-based LOW findings — lines no known pattern
   matches are checked for long high-entropy quoted strings (at least
   20 characters, Shannon entropy at least 4.0 bits/char), reported as
