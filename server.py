@@ -27,7 +27,9 @@ import json
 import asyncio
 import hashlib
 import random
+import subprocess
 from collections import Counter
+from datetime import datetime
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -396,13 +398,13 @@ def _per_file_counts(findings) -> dict:
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0):
+def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0, since=None):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
     report, so the JSON is safe to store in CI logs.
     """
-    return {
+    report = {
         "tool": "scan_secrets",
         "path": path,
         "files_scanned": scanned,
@@ -422,6 +424,96 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0):
             for f in findings
         ],
     }
+    if since is not None:
+        report["since"] = since
+    return report
+
+
+def _parse_since_timestamp(value: str) -> float | None:
+    """Parse a `since` value as a timestamp, or return None.
+
+    Accepts ISO dates/datetimes (``2026-10-01``, ``2026-10-01T09:30:00``,
+    trailing ``Z`` included) and plain epoch seconds. A naive datetime is
+    read in local time, matching how file mtimes are reported.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return parsed.timestamp()
+
+
+def _git_repo_root(start: str) -> str | None:
+    """Return the git repository root containing `start`, or None."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", start, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _git_changed_files(repo_root: str, since: str) -> set[str] | None:
+    """Return repo-relative paths changed since a git ref, or None.
+
+    ``git diff --name-only <ref>`` compares the ref against the worktree,
+    so staged and unstaged edits both count; untracked files (new files
+    are exactly what an incremental scan must not miss) are added via
+    ``git ls-files --others``. Returns None when the ref does not
+    resolve, so the caller can fall back to timestamp parsing.
+    """
+    try:
+        diff = subprocess.run(
+            ["git", "-C", repo_root, "diff", "--name-only", since],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if diff.returncode != 0:
+        return None
+    changed = {line.strip() for line in diff.stdout.splitlines() if line.strip()}
+    try:
+        others = subprocess.run(
+            ["git", "-C", repo_root, "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if others.returncode == 0:
+            changed.update(line.strip() for line in others.stdout.splitlines() if line.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return changed
+
+
+def _resolve_since(scan_root: str, since: str):
+    """Resolve a `since` value to ("git", changed_paths) or ("mtime", ts).
+
+    A value that resolves as a git ref in the scan path's repository wins;
+    otherwise a parseable date/timestamp selects files by mtime. Returns
+    (None, None, error_message) when the value is neither.
+    """
+    repo_root = _git_repo_root(scan_root)
+    if repo_root is not None:
+        changed = _git_changed_files(repo_root, since)
+        if changed is not None:
+            return "git", (repo_root, changed), None
+    ts = _parse_since_timestamp(since)
+    if ts is not None:
+        return "mtime", ts, None
+    return None, None, (
+        f"since must be a git ref resolvable in this repository or a "
+        f"date/timestamp, got: {since}"
+    )
 
 
 @mcp.tool()
@@ -431,6 +523,7 @@ def scan_secrets(
     exclude: str | None = None,
     json_output: bool = False,
     baseline: str | None = None,
+    since: str | None = None,
 ) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
@@ -458,6 +551,14 @@ def scan_secrets(
             An explicitly given baseline path that does not exist is
             an error; a missing auto-discovered file simply means no
             suppression.
+        since: Optional incremental-scan selector. A git ref (e.g.
+            `"HEAD~1"`, `"main"`, a commit SHA) scans only files
+            changed since that ref in the scan path's repository —
+            staged/unstaged edits plus untracked files — so CI runs on
+            large repos stay fast. A date/timestamp (e.g.
+            `"2026-10-01"`, an ISO datetime, or epoch seconds) scans
+            only files modified after that time. Anything else is an
+            error. Unchanged files are not counted as scanned.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -527,6 +628,29 @@ def scan_secrets(
                     continue
                 files.append(os.path.join(root, n))
 
+    if since is not None:
+        mode, value, since_error = _resolve_since(scan_root, since)
+        if since_error is not None:
+            if json_output:
+                return json.dumps({"tool": "scan_secrets", "path": path,
+                                   "error": since_error})
+            return f"Error: {since_error}"
+        if mode == "git":
+            repo_root, changed = value
+            files = [
+                fp for fp in files
+                if os.path.relpath(fp, repo_root) in changed
+            ]
+        else:
+            kept = []
+            for fp in files:
+                try:
+                    if os.path.getmtime(fp) > value:
+                        kept.append(fp)
+                except OSError:
+                    continue
+            files = kept
+
     if baseline is not None:
         if not os.path.isfile(baseline):
             if json_output:
@@ -588,6 +712,8 @@ def scan_secrets(
         f"Findings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
     )
+    if since is not None:
+        header += f"\nIncremental scan: only files changed since {since}"
     if suppressed:
         header += (
             f"\nSuppressed: {suppressed} acknowledged finding(s) "
@@ -601,11 +727,11 @@ def scan_secrets(
     if not findings:
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
-                                           unique, sev_counts, suppressed))
+                                           unique, sev_counts, suppressed, since))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
-                                       unique, sev_counts, suppressed), indent=2)
+                                       unique, sev_counts, suppressed, since), indent=2)
     rendered = "\n\n".join(
         f"  [{f['severity']}] {f['type']}\n"
         f"      {f['file']}:{f['line']}\n"

@@ -6,6 +6,20 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: incremental scan mode via `since=` — a git ref
+  (e.g. `HEAD~1`, a branch, a commit SHA) scans only files changed
+  since that ref in the scan path's repository (staged/unstaged edits
+  plus untracked files), and a date/timestamp (ISO date/datetime or
+  epoch seconds) scans only files modified after that time, so CI runs
+  on large repos stay fast. Unchanged files are not counted as
+  scanned; the report header notes the incremental selector and JSON
+  output carries it as `since`. A value that is neither a resolvable
+  ref nor a parseable date is an error.
+- `tests/test_incremental_scan.py`: 8 unit tests (modified-file-only
+  scan since HEAD, clean-tree no-op, untracked new file included,
+  JSON `since` field, timestamp mode, date fallback inside a git
+  repo, invalid-`since` error in text and JSON, timestamp parser
+  variants).
 - `scan_secrets`: `.guardx-baseline` allowlist — a baseline file at the
   scan root (or an explicit `baseline=` path) suppresses acknowledged
   findings by SHA-256 hash (relative path + finding type + secret
