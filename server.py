@@ -831,6 +831,86 @@ def _parse_go_mod(text: str):
                 yield parts[0], parts[1]
 
 
+def _parse_package_lock(text: str):
+    """Yield (name, version) pairs from a `package-lock.json`.
+
+    Handles the v2/v3 `packages` map (keys are `node_modules/...`
+    paths; scoped names keep their `@scope/` prefix, nested copies
+    resolve to the last `node_modules` segment) and the legacy v1
+    `dependencies` tree (recursed, since nested deps carry their own
+    versions). Exact (name, version) duplicates — v2 files carry both
+    maps — are yielded once.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+    seen = set()
+
+    def emit(name, version):
+        if name and version:
+            pair = (str(name), str(version))
+            if pair not in seen:
+                seen.add(pair)
+                yield pair
+
+    for key, info in (data.get("packages") or {}).items():
+        if not key or not isinstance(info, dict):
+            continue
+        version = info.get("version")
+        if not version:
+            continue
+        parts = str(key).split("/")
+        idxs = [i for i, p in enumerate(parts) if p == "node_modules"]
+        name_parts = parts[idxs[-1] + 1:] if idxs else parts
+        if name_parts:
+            yield from emit("/".join(name_parts), version)
+
+    def walk_deps(deps):
+        if not isinstance(deps, dict):
+            return
+        for name, info in deps.items():
+            if not isinstance(info, dict):
+                continue
+            yield from emit(name, info.get("version"))
+            yield from walk_deps(info.get("dependencies"))
+
+    yield from walk_deps(data.get("dependencies"))
+
+
+def _parse_toml_lock(text: str):
+    """Yield (name, version) pairs from `poetry.lock` / `Cargo.lock`.
+
+    Both formats are TOML with one `[[package]]` block per dependency;
+    each block's `name`/`version` lines are read and everything else
+    (sources, checksums, dependency lists, `[package.dependencies]`
+    sub-tables) is ignored. No TOML library is needed — and none is
+    assumed, since the stdlib only gained `tomllib` in Python 3.11
+    while GuardX supports 3.10.
+    """
+    current = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[["):
+            if isinstance(current, dict) and current.get("name") and current.get("version"):
+                yield current["name"], current["version"]
+            current = {} if line == "[[package]]" else None
+            continue
+        if not isinstance(current, dict):
+            continue
+        m = re.match(r'^name\s*=\s*"([^"]+)"', line)
+        if m:
+            current["name"] = m.group(1)
+            continue
+        m = re.match(r'^version\s*=\s*"([^"]+)"', line)
+        if m:
+            current["version"] = m.group(1)
+    if isinstance(current, dict) and current.get("name") and current.get("version"):
+        yield current["name"], current["version"]
+
+
 async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosystem: str):
     payload = {"version": version, "package": {"name": name, "ecosystem": ecosystem}}
     attempt = 0
@@ -858,10 +938,15 @@ async def audit_dependencies(path: str) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
 
     Supports Python (requirements.txt), npm (package.json), and Go
-    modules (go.mod). Only pinned/exact versions are checked.
+    modules (go.mod). Only pinned/exact versions are checked. Lockfiles
+    resolve transitive dependencies too: `package-lock.json` (npm),
+    `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) — so a
+    vulnerability in a dependency-of-a-dependency is caught even when
+    the direct manifest never names it.
 
     Args:
-        path: Path to a requirements.txt, package.json, or go.mod file.
+        path: Path to a requirements.txt, package.json, go.mod, or
+            lockfile (package-lock.json, poetry.lock, Cargo.lock).
 
     Returns:
         A report of known vulnerabilities (OSV/CVE ids and summaries).
@@ -873,7 +958,16 @@ async def audit_dependencies(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="ignore") as fh:
         text = fh.read()
 
-    if name_lower.endswith("package.json"):
+    if name_lower == "package-lock.json":
+        ecosystem = "npm"
+        deps = list(_parse_package_lock(text))
+    elif name_lower == "poetry.lock":
+        ecosystem = "PyPI"
+        deps = list(_parse_toml_lock(text))
+    elif name_lower == "cargo.lock":
+        ecosystem = "crates.io"
+        deps = list(_parse_toml_lock(text))
+    elif name_lower.endswith("package.json"):
         ecosystem = "npm"
         deps = list(_parse_package_json(text))
     elif name_lower == "go.mod":
@@ -885,14 +979,16 @@ async def audit_dependencies(path: str) -> str:
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
-            "Provide a requirements.txt, package.json, or go.mod."
+            "Provide a requirements.txt, package.json, go.mod, "
+            "package-lock.json, poetry.lock, or Cargo.lock."
         )
 
     if not deps:
         return (
             f"No pinned dependencies found in {path}. "
             '(Only exact versions are checked: "pkg==1.2.3" for pip, '
-            '"1.2.3" for npm, or a go.mod require line.)'
+            '"1.2.3" for npm, or a go.mod require line; lockfiles '
+            "contribute every package entry they contain.)"
         )
 
     deps = deps[:MAX_DEPS]

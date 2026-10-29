@@ -6,6 +6,22 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: lockfile support — `package-lock.json` (npm),
+  `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) now resolve
+  transitive dependencies instead of direct manifests only, so a
+  vulnerability in a dependency-of-a-dependency is caught. The npm
+  parser handles the v2/v3 `packages` map (scoped and nested
+  `node_modules` paths, root entry skipped, exact duplicates
+  deduped) and the legacy v1 `dependencies` tree; the TOML parser
+  reads `[[package]]` name/version lines without a TOML library
+  (stdlib `tomllib` only exists from Python 3.11, GuardX supports
+  3.10), ignoring sources, checksums, dependency lists, and
+  `[package.dependencies]` sub-tables. The unsupported-manifest
+  error now lists the lockfile names.
+- `tests/test_lockfiles.py`: 12 unit tests (packages-map parsing,
+  scoped/nested names, root/versionless skipping, dedupe, v1 tree,
+  bad-JSON tolerance, poetry/Cargo TOML parsing, npm/PyPI/crates.io
+  audit wiring, empty-lock message, unsupported-manifest message).
 - `scan_secrets`: incremental scan mode via `since=` — a git ref
   (e.g. `HEAD~1`, a branch, a commit SHA) scans only files changed
   since that ref in the scan path's repository (staged/unstaged edits
