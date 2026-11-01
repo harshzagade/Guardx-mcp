@@ -979,6 +979,22 @@ def _parse_min_severity(value: str | None) -> int | None:
     return _SEVERITY_RANKS.get(label)
 
 
+def _dedupe_deps(deps: list) -> tuple[list, int]:
+    """(unique_deps, cache_hits) for one audit run: exact (name, version)
+    duplicates are dropped in first-seen order, so the same package@version
+    is queried against OSV once per run even when several manifest entries
+    reference it (e.g. a pin repeated in requirements.txt, or the same
+    package in both `dependencies` and `devDependencies`). The cache is
+    per-run only — OSV data changes, so nothing is persisted across runs."""
+    seen = set()
+    unique = []
+    for dep in deps:
+        if dep not in seen:
+            seen.add(dep)
+            unique.append(dep)
+    return unique, len(deps) - len(unique)
+
+
 @mcp.tool()
 async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
@@ -988,7 +1004,9 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     resolve transitive dependencies too: `package-lock.json` (npm),
     `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) — so a
     vulnerability in a dependency-of-a-dependency is caught even when
-    the direct manifest never names it.
+    the direct manifest never names it. The same package@version is
+    queried against OSV only once per run: duplicate manifest entries
+    are served from a per-run cache and counted in the header.
 
     Args:
         path: Path to a requirements.txt, package.json, go.mod, or
@@ -1059,12 +1077,13 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
         )
 
     deps = deps[:MAX_DEPS]
+    unique_deps, cache_hits = _dedupe_deps(deps)
 
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}
     ) as client:
         results = await asyncio.gather(
-            *[_osv_query(client, n, v, ecosystem) for n, v in deps]
+            *[_osv_query(client, n, v, ecosystem) for n, v in unique_deps]
         )
 
     vuln_blocks = []
@@ -1102,13 +1121,15 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     header = (
         f"Dependency audit of {path}\n"
         f"Ecosystem: {ecosystem}\n"
-        f"Dependencies checked: {len(deps)}\n"
+        f"Dependencies checked: {len(unique_deps)}\n"
         f"Vulnerable packages: {vuln_pkgs}"
     )
     if min_label is not None:
         header += f"\nMinimum severity: {min_label}"
     if filtered_out:
         header += f"\nVulnerabilities hidden by filter: {filtered_out}"
+    if cache_hits:
+        header += f"\nOSV cache hits: {cache_hits}"
     if errors:
         header += f"\nLookups failed (network): {errors}"
     if not vuln_blocks:

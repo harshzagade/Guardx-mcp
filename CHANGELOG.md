@@ -22,6 +22,19 @@ actual git history — no invented features.
   filtered package reporting clean, no-filter behaviour keeping
   unscored vulnerabilities, `MED` alias + case-insensitivity, invalid
   value error).
+- `audit_dependencies`: per-run OSV response cache — the same
+  package@version is queried only once per run, even when several
+  manifest entries reference it (a repeated pin, or the same package
+  in both `dependencies` and `devDependencies`). Duplicate entries are
+  dropped in first-seen order before querying, so the report lists
+  each package once; `Dependencies checked` counts distinct packages
+  and the header gains an `OSV cache hits` line when duplicates were
+  served from the cache. The cache lives for one run only — OSV data
+  changes, so nothing is persisted across runs.
+- `tests/test_osv_cache.py`: 5 unit tests (dedupe order + hit count,
+  no-duplicate behaviour, duplicate pin queried once and reported
+  once, same name with different versions still queried separately,
+  no cache line without duplicates).
 - `audit_dependencies`: lockfile support — `package-lock.json` (npm),
   `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) now resolve
   transitive dependencies instead of direct manifests only, so a
