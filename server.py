@@ -933,8 +933,54 @@ async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosyst
         return name, version, vulns
 
 
+# CVSS severity bands (OSV `severity` entries carry a numeric score).
+_SEVERITY_RANKS = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+_MIN_SEVERITY_ALIASES = {"MED": "MEDIUM"}
+
+
+def _vuln_cvss_score(vuln: dict) -> float | None:
+    """Best (highest) numeric CVSS score on an OSV vuln, or None when the
+    vuln carries no parseable score."""
+    best = None
+    for entry in vuln.get("severity", []) or []:
+        try:
+            score = float(entry.get("score"))
+        except (TypeError, ValueError):
+            continue
+        if best is None or score > best:
+            best = score
+    return best
+
+
+def _vuln_severity(vuln: dict) -> tuple[str, float | None]:
+    """(label, score) for an OSV vuln, using standard CVSS bands:
+    >= 9.0 CRITICAL, >= 7.0 HIGH, >= 4.0 MEDIUM, > 0 LOW, else UNKNOWN."""
+    score = _vuln_cvss_score(vuln)
+    if score is None:
+        return "UNKNOWN", None
+    if score >= 9.0:
+        return "CRITICAL", score
+    if score >= 7.0:
+        return "HIGH", score
+    if score >= 4.0:
+        return "MEDIUM", score
+    if score > 0:
+        return "LOW", score
+    return "UNKNOWN", score
+
+
+def _parse_min_severity(value: str | None) -> int | None:
+    """Rank for a `min_severity` filter value, or None when the value is
+    invalid. A None input means "no filter" and is handled by the caller,
+    not here. Accepts any case; "MED" is an alias for "MEDIUM"."""
+    if value is None:
+        return None
+    label = _MIN_SEVERITY_ALIASES.get(value.strip().upper(), value.strip().upper())
+    return _SEVERITY_RANKS.get(label)
+
+
 @mcp.tool()
-async def audit_dependencies(path: str) -> str:
+async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
 
     Supports Python (requirements.txt), npm (package.json), and Go
@@ -947,12 +993,33 @@ async def audit_dependencies(path: str) -> str:
     Args:
         path: Path to a requirements.txt, package.json, go.mod, or
             lockfile (package-lock.json, poetry.lock, Cargo.lock).
+        min_severity: Optional severity floor ("LOW", "MEDIUM"/"MED",
+            "HIGH", "CRITICAL", any case). Vulnerabilities below the
+            floor are hidden from the report and counted in the header,
+            so noisy dependency trees can be triaged by severity.
+            Each reported vulnerability is tagged with its CVSS band
+            and score (e.g. `[HIGH 7.5]`); vulnerabilities with no
+            CVSS score are tagged `[UNKNOWN]` and are hidden by any
+            filter, since they cannot be shown to meet the floor.
 
     Returns:
         A report of known vulnerabilities (OSV/CVE ids and summaries).
     """
     if not os.path.isfile(path):
         return f"Error: file not found: {path}"
+
+    min_rank = None
+    min_label = None
+    if min_severity is not None:
+        min_rank = _parse_min_severity(min_severity)
+        if min_rank is None:
+            return (
+                f"Error: unknown min_severity: {min_severity!r}. "
+                "Use LOW, MEDIUM (or MED), HIGH, or CRITICAL."
+            )
+        min_label = _MIN_SEVERITY_ALIASES.get(
+            min_severity.strip().upper(), min_severity.strip().upper()
+        )
 
     name_lower = os.path.basename(path).lower()
     with open(path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -1003,22 +1070,33 @@ async def audit_dependencies(path: str) -> str:
     vuln_blocks = []
     errors = 0
     vuln_pkgs = 0
+    filtered_out = 0
     for name, version, vulns in results:
         if vulns is None:
             errors += 1
             continue
         if not vulns:
             continue
+        kept = []
+        for v in vulns:
+            label, score = _vuln_severity(v)
+            if min_rank is not None and _SEVERITY_RANKS[label] < min_rank:
+                filtered_out += 1
+                continue
+            kept.append((v, label, score))
+        if not kept:
+            continue
         vuln_pkgs += 1
         ids = []
-        for v in vulns[:10]:
+        for v, label, score in kept[:10]:
             vid = v.get("id", "?")
             aliases = ", ".join(v.get("aliases", [])[:3])
             summary = v.get("summary", "").strip()
-            label = f"{vid}" + (f" ({aliases})" if aliases else "")
-            ids.append(f"      - {label}" + (f": {summary}" if summary else ""))
+            tag = f" [{label} {score:g}]" if score is not None else f" [{label}]"
+            vuln_label = f"{vid}" + (f" ({aliases})" if aliases else "") + tag
+            ids.append(f"      - {vuln_label}" + (f": {summary}" if summary else ""))
         vuln_blocks.append(
-            f"  [!] {name}=={version}  -> {len(vulns)} known vuln(s)\n" + "\n".join(ids)
+            f"  [!] {name}=={version}  -> {len(kept)} known vuln(s)\n" + "\n".join(ids)
         )
 
     header = (
@@ -1027,6 +1105,10 @@ async def audit_dependencies(path: str) -> str:
         f"Dependencies checked: {len(deps)}\n"
         f"Vulnerable packages: {vuln_pkgs}"
     )
+    if min_label is not None:
+        header += f"\nMinimum severity: {min_label}"
+    if filtered_out:
+        header += f"\nVulnerabilities hidden by filter: {filtered_out}"
     if errors:
         header += f"\nLookups failed (network): {errors}"
     if not vuln_blocks:

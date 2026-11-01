@@ -6,6 +6,22 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: `min_severity` filter — an optional severity
+  floor (`LOW`, `MEDIUM`/`MED`, `HIGH`, `CRITICAL`, any case) hides
+  vulnerabilities below the floor from the report and counts them in
+  the header, so noisy dependency trees can be triaged by severity.
+  Each reported vulnerability is tagged with its CVSS band and score
+  (e.g. `[HIGH 7.5]`, from the highest score when a vuln carries
+  several); unscored vulnerabilities are tagged `[UNKNOWN]` and are
+  hidden by any filter, since they cannot be shown to meet the floor.
+  A package whose vulnerabilities are all filtered out is not counted
+  as vulnerable, and an unknown filter value is an error naming the
+  valid values.
+- `tests/test_min_severity.py`: 8 unit tests (CVSS band boundaries,
+  highest-score selection, filter hiding + hidden count, fully
+  filtered package reporting clean, no-filter behaviour keeping
+  unscored vulnerabilities, `MED` alias + case-insensitivity, invalid
+  value error).
 - `audit_dependencies`: lockfile support — `package-lock.json` (npm),
   `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) now resolve
   transitive dependencies instead of direct manifests only, so a
