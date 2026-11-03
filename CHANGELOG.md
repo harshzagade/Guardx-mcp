@@ -6,6 +6,21 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `check_pwned_passwords`: batch breached-password check — one call
+  audits a list of passwords with the same k-anonymity model as the
+  single check (only SHA-1 hash prefixes sent, matching done
+  locally). Passwords sharing a hash prefix are looked up once, so a
+  batch costs one range request per distinct prefix; each password
+  gets one numbered summary line (passwords never appear in the
+  output) and the header carries breached/clean/error counts, while a
+  per-prefix network or HTTP failure is reported on that prefix's
+  lines instead of failing the whole batch. The single check now
+  shares the same `_hibp_suffix_counts` lookup helper, with no change
+  to its output or retry behaviour.
+- `tests/test_batch_passwords.py`: 6 unit tests (empty list, one line
+  per password in input order, shared-prefix queried once, empty
+  entry without a request, per-prefix failure isolation, non-200
+  status per line).
 - `audit_dependencies`: `min_severity` filter — an optional severity
   floor (`LOW`, `MEDIUM`/`MED`, `HIGH`, `CRITICAL`, any case) hides
   vulnerabilities below the floor from the report and counts them in

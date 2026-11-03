@@ -12,6 +12,9 @@ Tools:
   2. audit_dependencies(path)    - check dependencies against the OSV vuln DB
   3. check_pwned_password(pw)    - check a password against Have I Been Pwned
                                    (k-anonymity: only a hash prefix is sent)
+  4. check_pwned_passwords(pws)  - batch version of (3): one summary line
+                                   per password, one range request per
+                                   distinct hash prefix
 
 No API keys are required and all tools are read-only / privacy-preserving.
 Use only on code and credentials you own or are authorized to assess.
@@ -1145,6 +1148,44 @@ HIBP_RANGE = "https://api.pwnedpasswords.com/range/"
 HIBP_MAX_ATTEMPTS = 3  # initial request + 2 retries on transient network failures
 
 
+async def _hibp_suffix_counts(client, prefix: str):
+    """(suffix -> breach count, error) for one HIBP range-prefix lookup.
+
+    Shared by the single and batch password checks so both get the same
+    retry behaviour: transient network failures (`httpx.RequestError`)
+    are retried twice with full-jitter backoff (up to 1s, then up to
+    2s); HTTP error statuses are not retried. Malformed response lines
+    are ignored, matching the single-check parser. Returns (None,
+    error_string) on failure.
+    """
+    resp = None
+    for attempt in range(HIBP_MAX_ATTEMPTS):
+        try:
+            resp = await client.get(HIBP_RANGE + prefix)
+            break
+        except httpx.RequestError as exc:
+            if attempt == HIBP_MAX_ATTEMPTS - 1:
+                return None, (
+                    f"Error: could not reach HIBP "
+                    f"({exc.__class__.__name__}: {exc})."
+                )
+            # Transient network failure: full-jitter backoff before retrying.
+            await asyncio.sleep(random.uniform(0, 2 ** attempt))
+
+    # The loop either breaks with a response or returns the error above.
+    if resp.status_code != 200:
+        return None, f"HIBP returned HTTP {resp.status_code}."
+
+    counts = {}
+    for line in resp.text.splitlines():
+        h, _, c = line.partition(":")
+        try:
+            counts[h.strip().upper()] = int(c.strip())
+        except ValueError:
+            continue
+    return counts, None
+
+
 @mcp.tool()
 async def check_pwned_password(password: str) -> str:
     """Check whether a password appears in known data breaches.
@@ -1168,34 +1209,14 @@ async def check_pwned_password(password: str) -> str:
     sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
     prefix, suffix = sha1[:5], sha1[5:]
 
-    resp = None
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT,
         headers={"User-Agent": USER_AGENT, "Add-Padding": "true"},
     ) as client:
-        for attempt in range(HIBP_MAX_ATTEMPTS):
-            try:
-                resp = await client.get(HIBP_RANGE + prefix)
-                break
-            except httpx.RequestError as exc:
-                if attempt == HIBP_MAX_ATTEMPTS - 1:
-                    return (
-                        f"Error: could not reach HIBP "
-                        f"({exc.__class__.__name__}: {exc})."
-                    )
-                # Transient network failure: full-jitter backoff before retrying.
-                await asyncio.sleep(random.uniform(0, 2 ** attempt))
-
-    # The loop either breaks with a response or returns the error above.
-    if resp.status_code != 200:
-        return f"HIBP returned HTTP {resp.status_code}."
-
-    count = 0
-    for line in resp.text.splitlines():
-        h, _, c = line.partition(":")
-        if h.strip().upper() == suffix:
-            count = int(c.strip())
-            break
+        counts, error = await _hibp_suffix_counts(client, prefix)
+    if error is not None:
+        return error
+    count = counts.get(suffix, 0)
 
     if count == 0:
         return (
@@ -1206,6 +1227,77 @@ async def check_pwned_password(password: str) -> str:
         f"WARNING: this password has appeared in known breaches {count:,} times. [!]\n"
         "Do not use it. Choose a unique, strong password and enable MFA.\n"
         "(Only the SHA-1 prefix was sent; the password never left this machine.)"
+    )
+
+
+@mcp.tool()
+async def check_pwned_passwords(passwords: list[str]) -> str:
+    """Check a list of passwords against known breaches, in one call.
+
+    Same k-anonymity model as `check_pwned_password`: only the first 5
+    characters of each password's SHA-1 hash are sent, and the match is
+    found locally. Passwords sharing a hash prefix are looked up once —
+    one range request per distinct prefix, in first-seen order — so a
+    batch with duplicate or prefix-colliding entries costs fewer
+    requests than one call per password. Each password still gets its
+    own summary line, and per-prefix lookup failures (network or HTTP
+    error) are reported on that prefix's lines instead of failing the
+    whole batch.
+
+    Args:
+        passwords: The passwords to check.
+
+    Returns:
+        A header line with breached/clean/error counts, then exactly
+        one summary line per password, in input order, numbered
+        ("Password 1: ...") — passwords themselves never appear in the
+        output, only their position in the list.
+    """
+    if not passwords:
+        return "Error: no passwords given."
+
+    # Group by hash prefix (first-seen order) so one range request
+    # serves every password sharing a prefix; empty entries get an
+    # error line without any network call.
+    groups: dict[str, list[tuple[int, str]]] = {}
+    lines: dict[int, str] = {}
+    for idx, password in enumerate(passwords, start=1):
+        if not password:
+            lines[idx] = f"Password {idx}: Error: empty password."
+            continue
+        sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+        groups.setdefault(sha1[:5], []).append((idx, sha1[5:]))
+
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": USER_AGENT, "Add-Padding": "true"},
+    ) as client:
+        for prefix, members in groups.items():
+            counts, error = await _hibp_suffix_counts(client, prefix)
+            for idx, suffix in members:
+                if error is not None:
+                    lines[idx] = f"Password {idx}: {error}"
+                elif counts.get(suffix, 0) > 0:
+                    lines[idx] = (
+                        f"Password {idx}: WARNING — appeared in known "
+                        f"breaches {counts[suffix]:,} times. Do not use it. [!]"
+                    )
+                else:
+                    lines[idx] = (
+                        f"Password {idx}: NOT found in any known breach. [OK]"
+                    )
+
+    breached = sum("WARNING" in line for line in lines.values())
+    clean = sum("[OK]" in line for line in lines.values())
+    errors = len(lines) - breached - clean
+    header = (
+        f"Password breach check: {len(passwords)} checked "
+        f"({breached} breached, {clean} clean, {errors} errors)"
+    )
+    body = "\n".join(lines[idx] for idx in range(1, len(passwords) + 1))
+    return header + "\n" + body + (
+        "\n(Only SHA-1 prefixes were sent; the passwords never left "
+        "this machine.)"
     )
 
 
