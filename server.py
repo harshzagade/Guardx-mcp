@@ -15,6 +15,10 @@ Tools:
   4. check_pwned_passwords(pws)  - batch version of (3): one summary line
                                    per password, one range request per
                                    distinct hash prefix
+Prompt:
+  audit_this_codebase_prompt     - "audit this codebase" template chaining
+                                   scan_secrets + audit_dependencies into a
+                                   remediation summary
 
 No API keys are required and all tools are read-only / privacy-preserving.
 Use only on code and credentials you own or are authorized to assess.
@@ -1299,6 +1303,56 @@ async def check_pwned_passwords(passwords: list[str]) -> str:
         "\n(Only SHA-1 prefixes were sent; the passwords never left "
         "this machine.)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Prompt: one-shot codebase audit
+# ---------------------------------------------------------------------------
+
+def audit_this_codebase_prompt(path: str = ".", manifest: str | None = None) -> str:
+    """Prompt template chaining GuardX's tools into a one-shot audit.
+
+    Registered as an MCP prompt when the installed SDK supports
+    `mcp.prompt()` (FastMCP 1.x does); on SDKs without prompt support
+    the plain function is still importable and returns the same text,
+    so the template is testable without a running server. The prompt
+    tells the client to run `scan_secrets` first, then
+    `audit_dependencies` on the project's manifest, then write a
+    remediation summary — secrets first (HIGH before MED/LOW),
+    vulnerabilities second — using only masked previews, never
+    pasting a real secret or password into its answer.
+    """
+    manifest_text = manifest or (
+        "the project's dependency manifest "
+        "(requirements.txt, package.json, go.mod, or a lockfile)"
+    )
+    return (
+        f"Audit this codebase for security issues: {path}\n\n"
+        "Work through these steps in order, using only the GuardX tools:\n\n"
+        "1. Run `scan_secrets` on the codebase path above. Note every "
+        "finding's file, line, type, and severity, and the report's "
+        "per-severity counts and unique-secrets count.\n"
+        "2. Run `audit_dependencies` on " + manifest_text + ". Note "
+        "every vulnerable package, its CVE/GHSA ids, and the CVSS band "
+        "and score of each vulnerability.\n"
+        "3. Write a remediation summary, in this order:\n"
+        "   a. Secrets to rotate immediately (HIGH findings first, then "
+        "MED, then LOW) — one line per finding: file, line, type.\n"
+        "   b. Dependencies to upgrade — one line per package: name, "
+        "pinned version, and its highest-severity vulnerability.\n"
+        "   c. Anything that looks like a false positive, and why.\n\n"
+        "Rules: quote only masked previews from the tool output — never "
+        "paste a real secret, token, or password into your answer. Do "
+        "not change any file; this audit is read-only. If a tool "
+        "reports a network or lookup failure, say so plainly instead "
+        "of claiming that area is clean."
+    )
+
+
+try:
+    audit_this_codebase_prompt = mcp.prompt()(audit_this_codebase_prompt)  # type: ignore[attr-defined]
+except AttributeError:
+    pass
 
 
 if __name__ == "__main__":

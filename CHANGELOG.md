@@ -21,6 +21,18 @@ actual git history — no invented features.
   per password in input order, shared-prefix queried once, empty
   entry without a request, per-prefix failure isolation, non-200
   status per line).
+- `audit_this_codebase_prompt`: MCP prompt template chaining
+  `scan_secrets` + `audit_dependencies` into a one-shot audit with a
+  remediation summary (secrets to rotate first, HIGH before MED/LOW,
+  then dependencies to upgrade, then suspected false positives). It
+  registers via `mcp.prompt()` when the SDK supports prompts and
+  otherwise stays a plain importable function returning the same
+  text, so it is testable without a running server; the template
+  forbids pasting real secrets and requires tool failures to be
+  reported instead of claimed clean.
+- `tests/test_audit_prompt.py`: 5 unit tests (tool chaining order,
+  defaults, secrets-before-dependencies ordering, masked-preview and
+  read-only rules, failure-reporting rule).
 - `audit_dependencies`: `min_severity` filter — an optional severity
   floor (`LOW`, `MEDIUM`/`MED`, `HIGH`, `CRITICAL`, any case) hides
   vulnerabilities below the floor from the report and counts them in
