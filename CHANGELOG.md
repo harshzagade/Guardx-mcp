@@ -23,6 +23,21 @@ actual git history — no invented features.
   placeholder skipping, Azure key forms, non-credential keys, tfvars
   without a block, code-file exclusion, CloudFormation RDS vs S3,
   ARM SQL server, JSON masking).
+- `audit_dependencies`: OSV querybatch — all distinct dependencies are
+  now queried in a single `POST /v1/querybatch` call instead of one
+  query per package, with results aligned to queries by position
+  (entries without a `vulns` key mean no known vulnerabilities). The
+  batch keeps the single-query 429 retry behaviour (honouring
+  `Retry-After`, else exponential backoff, clamped); a non-429 failure,
+  network error, or truncated response counts every affected dep as a
+  lookup failure instead of claiming it clean. `_osv_query` is kept
+  for single-package callers. Existing OSV test fakes were updated to
+  the batch contract (one batch post per audit, queries inspected
+  instead of per-package payloads).
+- `tests/test_osv_querybatch.py`: 6 unit tests (single batch call and
+  payload shape, position alignment incl. vuln-less entries, 429
+  retry with `Retry-After`, non-429 and network failures counted as
+  lookup failures, truncated-results tail counted as a failure).
 - `check_pwned_passwords`: batch breached-password check — one call
   audits a list of passwords with the same k-anonymity model as the
   single check (only SHA-1 hash prefixes sent, matching done

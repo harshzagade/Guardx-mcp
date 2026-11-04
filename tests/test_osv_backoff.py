@@ -246,7 +246,7 @@ def test_audit_uses_backoff_end_to_end(monkeypatch, tmp_path):
     client.script = [
         FakeResponse(status_code=429),
         FakeResponse(status_code=429, headers={"retry-after": "3"}),
-        FakeResponse(payload={"vulns": VULNS}),
+        FakeResponse(payload={"results": [{"vulns": VULNS}]}),
     ]
 
     class PatchedClient:
@@ -266,5 +266,6 @@ def test_audit_uses_backoff_end_to_end(monkeypatch, tmp_path):
     out = run(guardx.audit_dependencies(str(req)))
     assert "CVE-2024-1234" in out
     assert sleeper.waits == [1.0, 3.0]
-    # the retried request kept the original payload
-    assert all(payload["package"]["name"] == "requests" for _, payload in client.posts)
+    # the retried request kept the original payload (one batch query)
+    assert all(q["package"]["name"] == "requests"
+               for _, payload in client.posts for q in payload["queries"])

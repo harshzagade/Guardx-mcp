@@ -908,6 +908,7 @@ def scan_secrets(
 # ---------------------------------------------------------------------------
 
 OSV_QUERY = "https://api.osv.dev/v1/query"
+OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch"
 MAX_DEPS = 100
 OSV_MAX_ATTEMPTS = 4  # initial try + up to 3 retries on HTTP 429
 OSV_MAX_RETRY_WAIT = 60.0  # never wait longer than this per retry
@@ -1091,6 +1092,49 @@ async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosyst
         return name, version, vulns
 
 
+async def _osv_querybatch(client: httpx.AsyncClient, deps: list, ecosystem: str):
+    """[(name, version, vulns | None)] for every dep in `deps`, from a
+    single `POST /v1/querybatch` call.
+
+    The response's `results` array is in query order, so result `i`
+    belongs to dep `i`; an entry without a `vulns` key means no known
+    vulnerabilities. Retry behaviour mirrors `_osv_query`: HTTP 429 is
+    retried up to OSV_MAX_ATTEMPTS times honouring `Retry-After` (else
+    exponential 1s/2s/4s, clamped), other non-200 statuses and network
+    failures fail the whole batch (every dep reported as a lookup
+    failure, counted in the header) rather than silently claiming the
+    batch clean. A response shorter than the query list is treated the
+    same way for the missing tail — a truncated batch must not read as
+    "no vulnerabilities". `_osv_query` stays for single-package callers
+    and its backoff tests; `audit_dependencies` uses this batch call."""
+    queries = [
+        {"version": version, "package": {"name": name, "ecosystem": ecosystem}}
+        for name, version in deps
+    ]
+    attempt = 0
+    while True:
+        try:
+            resp = await client.post(OSV_QUERYBATCH, json={"queries": queries})
+        except httpx.RequestError:
+            return [(name, version, None) for name, version in deps]
+        if resp.status_code != 200:
+            attempt += 1
+            if resp.status_code != 429 or attempt >= OSV_MAX_ATTEMPTS:
+                return [(name, version, None) for name, version in deps]
+            retry_after = _retry_after_seconds(resp.headers.get("retry-after"))
+            wait = retry_after if retry_after is not None else 2.0 ** (attempt - 1)
+            await asyncio.sleep(min(wait, OSV_MAX_RETRY_WAIT))
+            continue
+        results = resp.json().get("results", [])
+        out = []
+        for i, (name, version) in enumerate(deps):
+            if i >= len(results) or not isinstance(results[i], dict):
+                out.append((name, version, None))
+            else:
+                out.append((name, version, results[i].get("vulns", [])))
+        return out
+
+
 # CVSS severity bands (OSV `severity` entries carry a numeric score).
 _SEVERITY_RANKS = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 _MIN_SEVERITY_ALIASES = {"MED": "MEDIUM"}
@@ -1164,7 +1208,11 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     vulnerability in a dependency-of-a-dependency is caught even when
     the direct manifest never names it. The same package@version is
     queried against OSV only once per run: duplicate manifest entries
-    are served from a per-run cache and counted in the header.
+    are served from a per-run cache and counted in the header. All
+    distinct dependencies are queried in a single `POST /v1/querybatch`
+    call instead of one query per package, so a large manifest costs
+    one round trip (with the same 429 retry behaviour as a single
+    query; a failed batch counts every dep as a lookup failure).
 
     Args:
         path: Path to a requirements.txt, package.json, go.mod, or
@@ -1240,9 +1288,9 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}
     ) as client:
-        results = await asyncio.gather(
-            *[_osv_query(client, n, v, ecosystem) for n, v in unique_deps]
-        )
+        # One querybatch call for the whole manifest, not one query
+        # per package — large manifests cost one round trip.
+        results = await _osv_querybatch(client, unique_deps, ecosystem)
 
     vuln_blocks = []
     errors = 0

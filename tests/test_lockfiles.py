@@ -97,6 +97,10 @@ class FakeClient:
 
     async def post(self, url: str, json: dict):
         self.posts.append((url, json))
+        if "queries" in json:
+            # querybatch: one empty result per query, in query order.
+            return FakeResponse(payload={"results": [
+                {"vulns": []} for _ in json["queries"]]})
         return FakeResponse()
 
 
@@ -182,10 +186,11 @@ def test_package_lock_audit_queries_npm(tmp_path):
     out, client = _audit(tmp_path, "package-lock.json", PACKAGE_LOCK)
     assert "Ecosystem: npm" in out
     assert "Dependencies checked: 3" in out
-    by_name = {p["package"]["name"]: p["version"]
-               for _, p in client.posts}
+    by_name = {q["package"]["name"]: q["version"]
+               for _, p in client.posts for q in p["queries"]}
     assert by_name["@scope/pkg"] == "2.0.1"
-    assert all(p["package"]["ecosystem"] == "npm" for _, p in client.posts)
+    assert all(q["package"]["ecosystem"] == "npm"
+               for _, p in client.posts for q in p["queries"])
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +258,16 @@ def test_poetry_lock_audit_queries_pypi(tmp_path):
     out, client = _audit(tmp_path, "poetry.lock", POETRY_LOCK)
     assert "Ecosystem: PyPI" in out
     assert "Dependencies checked: 2" in out
-    assert all(p["package"]["ecosystem"] == "PyPI" for _, p in client.posts)
+    assert all(q["package"]["ecosystem"] == "PyPI"
+               for _, p in client.posts for q in p["queries"])
 
 
 def test_cargo_lock_audit_queries_crates_io(tmp_path):
     out, client = _audit(tmp_path, "Cargo.lock", CARGO_LOCK)
     assert "Ecosystem: crates.io" in out
     assert "Dependencies checked: 2" in out
-    by_name = {p["package"]["name"]: p["version"] for _, p in client.posts}
+    by_name = {q["package"]["name"]: q["version"]
+               for _, p in client.posts for q in p["queries"]}
     assert by_name["serde_derive"] == "1.0.163"
 
 

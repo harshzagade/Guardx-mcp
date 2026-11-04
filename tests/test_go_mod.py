@@ -105,6 +105,10 @@ class FakeClient:
 
     async def post(self, url: str, json: dict):
         self.posts.append((url, json))
+        if "queries" in json:
+            # querybatch: one empty result per query, in query order.
+            return FakeResponse(payload={"results": [
+                {"vulns": []} for _ in json["queries"]]})
         return FakeResponse()
 
 
@@ -194,9 +198,10 @@ def test_go_mod_audit_queries_go_ecosystem(tmp_path):
     out, client = _audit(tmp_path, "go.mod", GO_MOD)
     assert "Ecosystem: Go" in out
     assert "Dependencies checked: 3" in out
-    payloads = [p for _, p in client.posts]
-    assert all(p["package"]["ecosystem"] == "Go" for p in payloads)
-    by_name = {p["package"]["name"]: p["version"] for p in payloads}
+    queries = [q for _, p in client.posts for q in p["queries"]]
+    assert len(client.posts) == 1  # one querybatch call, not one per package
+    assert all(q["package"]["ecosystem"] == "Go" for q in queries)
+    by_name = {q["package"]["name"]: q["version"] for q in queries}
     assert by_name["github.com/gin-gonic/gin"] == "v1.9.1"
     assert by_name["golang.org/x/net"] == "v0.20.0"
     assert "No known vulnerabilities found. [OK]" in out
@@ -206,6 +211,11 @@ def test_go_mod_vuln_reported(tmp_path):
     class VulnClient(FakeClient):
         async def post(self, url: str, json: dict):
             self.posts.append((url, json))
+            if "queries" in json:
+                return FakeResponse(payload={"results": [
+                    {"vulns": ([{"id": "GO-2024-1234", "summary": "test go vuln"}]
+                               if q["package"]["name"] == "golang.org/x/crypto" else [])}
+                    for q in json["queries"]]})
             vulns = [{"id": "GO-2024-1234", "summary": "test go vuln"}] \
                 if json["package"]["name"] == "golang.org/x/crypto" else []
             return FakeResponse(payload={"vulns": vulns})

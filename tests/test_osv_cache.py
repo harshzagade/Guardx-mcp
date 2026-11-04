@@ -96,6 +96,11 @@ class FakeClient:
 
     async def post(self, url: str, json: dict):
         self.posts.append((url, json))
+        if "queries" in json:
+            # querybatch: one result per query, in query order.
+            return FakeResponse(payload={"results": [
+                {"vulns": self.vulns_by_name.get(q["package"]["name"], [])}
+                for q in json["queries"]]})
         name = json["package"]["name"]
         return FakeResponse(payload={"vulns": self.vulns_by_name.get(name, [])})
 
@@ -152,7 +157,9 @@ def test_duplicate_pin_queried_once_and_reported_once(tmp_path):
     out, client = _audit(
         tmp_path, vulns, "requests==2.28.0\nrequests==2.28.0\nurllib3==1.26.0\n"
     )
-    assert len(client.posts) == 2  # requests once, urllib3 once
+    assert len(client.posts) == 1  # one querybatch call for both deps
+    assert [q["package"]["name"] for q in client.posts[0][1]["queries"]] == [
+        "requests", "urllib3"]  # deduped: requests once, urllib3 once
     assert "Dependencies checked: 2" in out
     assert "OSV cache hits: 1" in out
     assert out.count("  [!] requests==2.28.0") == 1
@@ -163,7 +170,7 @@ def test_same_name_different_version_queried_twice(tmp_path):
     out, client = _audit(
         tmp_path, {}, "requests==2.28.0\nrequests==2.31.0\n"
     )
-    assert len(client.posts) == 2
+    assert len(client.posts[0][1]["queries"]) == 2  # both versions, one batch
     assert "Dependencies checked: 2" in out
     assert "OSV cache hits" not in out
     assert "No known vulnerabilities found. [OK]" in out
@@ -171,6 +178,7 @@ def test_same_name_different_version_queried_twice(tmp_path):
 
 def test_no_duplicates_no_cache_line(tmp_path):
     out, client = _audit(tmp_path, {}, "requests==2.28.0\nurllib3==1.26.0\n")
-    assert len(client.posts) == 2
+    assert len(client.posts) == 1  # one querybatch call for both deps
+    assert len(client.posts[0][1]["queries"]) == 2
     assert "Dependencies checked: 2" in out
     assert "OSV cache hits" not in out

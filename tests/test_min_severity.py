@@ -97,6 +97,11 @@ class FakeClient:
 
     async def post(self, url: str, json: dict):
         self.posts.append((url, json))
+        if "queries" in json:
+            # querybatch: one result per query, in query order.
+            return FakeResponse(payload={"results": [
+                {"vulns": self.vulns_by_name.get(q["package"]["name"], [])}
+                for q in json["queries"]]})
         name = json["package"]["name"]
         return FakeResponse(payload={"vulns": self.vulns_by_name.get(name, [])})
 
