@@ -353,6 +353,131 @@ def _config_credential_hit(line: str, filename: str):
     return "Config Credential", "MED", value
 
 
+# IaC credential heuristic: in infrastructure-as-code files, a hardcoded
+# credential inside a resource block that actually provisions a credential
+# store (a database, a cache with auth, a SQL server) is a HIGH finding —
+# the value is a live credential for a deployed service, not a generic
+# assignment. Block-awareness matters: the same `password = ...` line in
+# an unrelated resource (or outside any sensitive block) is left to the
+# generic/config heuristics instead of being promoted. Terraform
+# (`.tf`) blocks are tracked by brace depth, so the context ends when
+# the resource block closes; CloudFormation/ARM templates (`.json`,
+# `.yaml`) carry no braces to count, so their context lasts until the
+# next `Type:` declaration. `.tfvars` files have no resource blocks at
+# all, so every credential-named assignment in one is treated as IaC
+# (a tfvars file is, by definition, values for a deployment).
+_IAC_EXTS = {".tf", ".tfvars", ".json", ".yaml", ".yml"}
+_IAC_TF_RESOURCE_RE = re.compile(
+    r"""^\s*resource\s+"([^"]+)"\s+"[^"]+"\s*\{"""
+)
+_IAC_TYPE_RE = re.compile(
+    r"""^\s*"(?i:type)"?\s*[:=]\s*"?"""
+    r"""(AWS::[A-Za-z0-9:]+|Microsoft\.[A-Za-z0-9/._\-]+)"?,?\s*$"""
+    r"""|^\s*(?i:type)\s*[:=]\s*"?"""
+    r"""(AWS::[A-Za-z0-9:]+|Microsoft\.[A-Za-z0-9/._\-]+)"?,?\s*$"""
+)
+_IAC_TF_SENSITIVE_PREFIXES = (
+    "aws_db_", "aws_rds_", "aws_redshift_", "aws_elasticache_",
+    "azurerm_sql_", "azurerm_mysql_", "azurerm_postgresql_",
+    "azurerm_mariadb_",
+)
+_IAC_CFN_SENSITIVE_TYPES = {
+    "AWS::RDS::DBInstance", "AWS::RDS::DBCluster",
+    "AWS::Redshift::Cluster", "AWS::DocDB::DBCluster",
+    "AWS::ElastiCache::ReplicationGroup", "AWS::ElastiCache::CacheCluster",
+}
+_IAC_ARM_SENSITIVE_TYPES = {
+    "Microsoft.DBforMySQL/servers", "Microsoft.DBforPostgreSQL/servers",
+    "Microsoft.DBforMariaDB/servers", "Microsoft.Sql/servers",
+    "Microsoft.DocumentDB/databaseAccounts",
+}
+_IAC_ASSIGN_RE = re.compile(
+    r"""^\s*"?([A-Za-z0-9_.\-]+)"?\s*[:=]\s*"""
+    r"""["']?([^"'\s,;]+)["']?,?\s*$"""
+)
+_IAC_REFERENCE_PREFIXES = ("var.", "local.", "data.", "module.",
+                           "random_password.", "aws_", "azurerm_")
+
+
+def _is_iac_file(filename: str) -> bool:
+    return os.path.splitext(os.path.basename(filename))[1].lower() in _IAC_EXTS
+
+
+def _iac_resource_type(line: str):
+    """Resource type declared on `line`, or None.
+
+    Terraform: `resource "aws_db_instance" "main" {`. CloudFormation /
+    ARM: a `Type:` / `"Type":` line naming an `AWS::...` or
+    `Microsoft....` resource type."""
+    m = _IAC_TF_RESOURCE_RE.match(line)
+    if m:
+        return m.group(1)
+    m = _IAC_TYPE_RE.match(line.strip())
+    if m:
+        return m.group(1) or m.group(2)
+    return None
+
+
+def _iac_resource_sensitive(resource_type: str | None) -> bool:
+    """True when `resource_type` provisions a credential store."""
+    if resource_type is None:
+        return False
+    if resource_type == "tfvars":
+        return True
+    if resource_type.startswith(_IAC_TF_SENSITIVE_PREFIXES):
+        return True
+    return (resource_type in _IAC_CFN_SENSITIVE_TYPES
+            or resource_type in _IAC_ARM_SENSITIVE_TYPES)
+
+
+def _iac_key_is_credential(key: str) -> bool:
+    """True when the key's last name token is credential-like.
+
+    Splits on `_`/`.`/`-` and on camelCase boundaries, so
+    `master_password`, `MasterUserPassword`, and
+    `administratorLoginPassword` all end in `password` while
+    `password_length` and `secret_santa` stay clean."""
+    parts = re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+",
+                       key.replace("_", " ").replace(".", " ").replace("-", " "))
+    if not parts:
+        return False
+    return parts[-1].lower() in _CONFIG_CRED_TOKENS
+
+
+def _iac_credential_hit(line: str, filename: str, resource_type: str | None):
+    """Return ("IaC Credential", "HIGH", value) for a hardcoded
+    credential assignment inside a sensitive IaC resource block, or
+    None.
+
+    Runs only on IaC files and only inside a sensitive block, so a
+    password in an unrelated resource is not promoted. Placeholder
+    values (`changeme`, `${var...}` interpolations, `var.`/`local.`
+    references, masked `***`) stay clean, exactly like the config
+    heuristic. Known patterns still win on lines that are not
+    credential assignments (a bare AWS key in a .tf file is reported
+    under its pattern name, not here)."""
+    if not _is_iac_file(filename):
+        return None
+    if not _iac_resource_sensitive(resource_type):
+        return None
+    stripped = line.strip()
+    if not stripped or stripped[0] in "#;/":
+        return None
+    m = _IAC_ASSIGN_RE.match(stripped)
+    if not m:
+        return None
+    key, value = m.group(1), m.group(2)
+    if not _iac_key_is_credential(key):
+        return None
+    lowered = value.lower()
+    if (len(value) < 4 or lowered in _CONFIG_PLACEHOLDERS
+            or lowered.startswith("${") or lowered.startswith("<")
+            or value.startswith(_IAC_REFERENCE_PREFIXES)
+            or set(value) <= set("*x")):
+        return None
+    return "IaC Credential", "HIGH", value
+
+
 def _mask(secret: str) -> str:
     secret = secret.strip()
     if len(secret) <= 8:
@@ -585,7 +710,14 @@ def scan_secrets(
         formats; plain English and pure hex hashes stay below the
         threshold. When scanning a directory, a `.gitignore` at the
         scan root is honoured (basename/dir/negation patterns); ignored
-        paths are not counted as scanned.
+        paths are not counted as scanned. In infrastructure-as-code
+        files (Terraform `.tf`, `.tfvars`, CloudFormation/ARM
+        `.json`/`.yaml`), a credential assignment inside a sensitive
+        resource block (e.g. `aws_db_instance`, `AWS::RDS::DBInstance`,
+        `Microsoft.Sql/servers`) is reported as a HIGH "IaC Credential"
+        finding; the same assignment outside a sensitive block is left
+        to the generic/config heuristics, and placeholder values and
+        `var.`/`local.` references stay clean.
     """
     if not os.path.exists(path):
         if json_output:
@@ -683,8 +815,27 @@ def scan_secrets(
             continue
         scanned += 1
 
+        # IaC block context for this file: the resource type currently
+        # open (Terraform: brace-tracked; CFN/ARM: until the next Type;
+        # .tfvars: the whole file, since it holds deployment values).
+        iac_resource = None
+        iac_depth = 0
+        if os.path.splitext(fp)[1].lower() == ".tfvars":
+            iac_resource = "tfvars"
         for lineno, line in enumerate(lines, start=1):
-            hit = (_match_line(line) or _config_credential_hit(line, fp)
+            if _is_iac_file(fp):
+                declared = _iac_resource_type(line)
+                if declared is not None:
+                    iac_resource = declared
+                    iac_depth = line.count("{") - line.count("}")
+                elif iac_resource is not None and iac_depth > 0:
+                    iac_depth += line.count("{") - line.count("}")
+                    if iac_depth <= 0:
+                        iac_resource = None
+                        iac_depth = 0
+            iac_hit = _iac_credential_hit(line, fp, iac_resource)
+            hit = (iac_hit or _match_line(line)
+                   or _config_credential_hit(line, fp)
                    or _entropy_hit(line))
             if hit:
                 name, severity, secret = hit

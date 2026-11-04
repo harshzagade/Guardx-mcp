@@ -6,6 +6,23 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: IaC credential scan — in Terraform (`.tf`,
+  `.tfvars`), CloudFormation, and ARM files, a hardcoded credential
+  assignment inside a sensitive resource block (`aws_db_instance` /
+  `aws_rds_*` / `azurerm_sql_*` / `AWS::RDS::DBInstance` /
+  `Microsoft.Sql/servers`, and similar database/SQL types) is a HIGH
+  "IaC Credential" finding. Terraform blocks are tracked by brace
+  depth so the context ends when the block closes; CloudFormation/ARM
+  context lasts until the next `Type:` declaration; `.tfvars` files
+  are treated as deployment values throughout. The same assignment
+  outside a sensitive block is left to the generic/config heuristics,
+  and placeholder values, `${var...}` interpolations, and
+  `var.`/`local.` references stay clean.
+- `tests/test_iac_credentials.py`: 12 unit tests (Terraform sensitive
+  vs non-sensitive blocks, block-close context end, reference and
+  placeholder skipping, Azure key forms, non-credential keys, tfvars
+  without a block, code-file exclusion, CloudFormation RDS vs S3,
+  ARM SQL server, JSON masking).
 - `check_pwned_passwords`: batch breached-password check — one call
   audits a list of passwords with the same k-anonymity model as the
   single check (only SHA-1 hash prefixes sent, matching done
