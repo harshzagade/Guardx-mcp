@@ -37,6 +37,7 @@ import random
 import subprocess
 from collections import Counter
 from datetime import datetime
+from functools import cmp_to_key
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -1171,6 +1172,102 @@ def _vuln_severity(vuln: dict) -> tuple[str, float | None]:
     return "UNKNOWN", score
 
 
+def _version_tokens(version: str) -> list:
+    """Sortable tokens for a version string: numeric runs become (0, int)
+    and text runs (1, str), so 1.10.0 sorts after 1.9.0. A leading "v"
+    is stripped; separators (`.`, `-`, `+`, `_`) just split the runs."""
+    tokens = []
+    for part in re.split(r"[.\-+_]", str(version).strip().lstrip("vV")):
+        if not part:
+            continue
+        for tok in re.findall(r"\d+|[^\d]+", part):
+            tokens.append((0, int(tok)) if tok.isdigit() else (1, tok))
+    return tokens
+
+
+def _version_cmp(a: str, b: str) -> int:
+    """-1/0/1 version comparison, best-effort for the version strings OSV
+    carries: numeric runs compare numerically, a trailing pre-release
+    tag sorts below the bare release ("1.2.3rc1" < "1.2.3"), and a
+    shorter prefix sorts below its extension ("1.2" < "1.2.3"). Only
+    used to decide whether a queried version sits below an OSV `fixed`
+    version — never for security decisions."""
+    ta, tb = _version_tokens(a), _version_tokens(b)
+    for x, y in zip(ta, tb):
+        if x == y:
+            continue
+        if x[0] == 0 and y[0] == 0:
+            return -1 if x[1] < y[1] else 1
+        if x[0] == 0:
+            return -1
+        if y[0] == 0:
+            return 1
+        return -1 if x[1] < y[1] else 1
+    if len(ta) == len(tb):
+        return 0
+    # One is a prefix of the other: a trailing pre-release tag sorts
+    # below the bare release; otherwise the shorter one is earlier.
+    longer = ta if len(ta) > len(tb) else tb
+    extra_is_prerelease = longer[min(len(ta), len(tb))][0] == 1
+    if extra_is_prerelease:
+        return 1 if len(ta) < len(tb) else -1
+    return -1 if len(ta) < len(tb) else 1
+
+
+def _vuln_fixed_versions(vuln: dict, version: str, ecosystem: str | None = None):
+    """(fixed_versions, has_unfixed_range) for one OSV vuln at `version`.
+
+    Walks each `affected` entry's `ranges` events in order: an
+    `introduced` event at or below the queried version opens the
+    affected window, a `fixed` event at or below it closes it, and a
+    `last_affected`/`limit` event bounds it. For every range still open
+    at the queried version, the first `fixed` event above it is the
+    version that closes the hole; ranges with no such event are
+    reported via `has_unfixed_range` (e.g. only a `last_affected` is
+    known, or no fix has been released yet). An entry with no
+    `introduced` event is treated as affected from the start, per the
+    OSV schema. Entries without `ranges` (a bare `versions` list) carry
+    no fix information and are skipped, as are entries for a different
+    ecosystem than the one queried (when the entry names one). The
+    returned versions are deduplicated and sorted ascending, so the
+    caller can suggest the highest one as the single upgrade target
+    that closes every affected range.
+    """
+    fixed: list[str] = []
+    unfixed = False
+    for affected in vuln.get("affected", []) or []:
+        pkg = affected.get("package") or {}
+        entry_eco = pkg.get("ecosystem")
+        if ecosystem is not None and entry_eco is not None and entry_eco != ecosystem:
+            continue
+        for rng in affected.get("ranges", []) or []:
+            events = rng.get("events", []) or []
+            introduced_seen = any("introduced" in e for e in events)
+            # No introduced event: affected from the start.
+            affected_now = not introduced_seen
+            fix_after = None
+            for ev in events:
+                if "introduced" in ev:
+                    affected_now = _version_cmp(ev["introduced"], version) <= 0
+                elif "fixed" in ev:
+                    if _version_cmp(ev["fixed"], version) <= 0:
+                        affected_now = False
+                    elif affected_now and fix_after is None:
+                        fix_after = ev["fixed"]
+                elif "last_affected" in ev:
+                    affected_now = _version_cmp(ev["last_affected"], version) >= 0
+                elif "limit" in ev:
+                    if _version_cmp(ev["limit"], version) <= 0:
+                        affected_now = False
+            if affected_now:
+                if fix_after is not None:
+                    fixed.append(fix_after)
+                else:
+                    unfixed = True
+    fixed = sorted(set(fixed), key=cmp_to_key(_version_cmp))
+    return fixed, unfixed
+
+
 def _parse_min_severity(value: str | None) -> int | None:
     """Rank for a `min_severity` filter value, or None when the value is
     invalid. A None input means "no filter" and is handled by the caller,
@@ -1225,6 +1322,12 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             and score (e.g. `[HIGH 7.5]`); vulnerabilities with no
             CVSS score are tagged `[UNKNOWN]` and are hidden by any
             filter, since they cannot be shown to meet the floor.
+            Each finding also carries fixed-version guidance from the
+            OSV `affected` ranges: "upgrade to >= X" names the lowest
+            version that closes every affected range for the queried
+            version, or "no fixed version released" when an affected
+            range has no fix yet; vulnerabilities without range data
+            carry no guidance.
 
     Returns:
         A report of known vulnerabilities (OSV/CVE ids and summaries).
@@ -1319,7 +1422,19 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             summary = v.get("summary", "").strip()
             tag = f" [{label} {score:g}]" if score is not None else f" [{label}]"
             vuln_label = f"{vid}" + (f" ({aliases})" if aliases else "") + tag
-            ids.append(f"      - {vuln_label}" + (f": {summary}" if summary else ""))
+            fixed, unfixed = _vuln_fixed_versions(v, version, ecosystem)
+            if fixed:
+                # The highest fixed version closes every affected range.
+                guidance = f" — upgrade to >= {fixed[-1]}"
+            elif unfixed:
+                guidance = " — no fixed version released"
+            else:
+                guidance = ""
+            ids.append(
+                f"      - {vuln_label}"
+                + (f": {summary}" if summary else "")
+                + guidance
+            )
         vuln_blocks.append(
             f"  [!] {name}=={version}  -> {len(kept)} known vuln(s)\n" + "\n".join(ids)
         )

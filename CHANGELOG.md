@@ -6,6 +6,25 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: fixed-version guidance — each reported
+  vulnerability now reads "upgrade to >= X" (the lowest version that
+  closes every OSV `affected` range for the queried version) or "no
+  fixed version released" when an affected range has no fix yet
+  (`last_affected` with no `fixed` event, or a reintroduced range).
+  Ranges are walked event by event (`introduced` opens the window,
+  `fixed` closes it, `last_affected`/`limit` bound it; a range with
+  no `introduced` event counts as affected from the start), and
+  entries for other ecosystems or without `ranges` are skipped, so
+  the guidance never names a fix for a version the query already
+  passed. A small best-effort version comparator (numeric runs sort
+  numerically, a trailing pre-release tag sorts below the bare
+  release) decides whether the queried version sits below a fix.
+- `tests/test_fixed_versions.py`: 17 unit tests (version comparison:
+  numeric runs, `v` prefix, pre-release, prefix ordering;
+  fixed-version extraction: single/multiple/mixed ranges,
+  already-fixed, before-introduced, fixed-gap, reintroduced,
+  `last_affected`-only, no-`affected`, no-`ranges`, other-ecosystem;
+  report lines for guided, unfixed, and range-less findings).
 - `scan_secrets`: IaC credential scan — in Terraform (`.tf`,
   `.tfvars`), CloudFormation, and ARM files, a hardcoded credential
   assignment inside a sensitive resource block (`aws_db_instance` /
