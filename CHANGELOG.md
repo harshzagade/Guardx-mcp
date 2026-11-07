@@ -25,6 +25,26 @@ actual git history — no invented features.
   already-fixed, before-introduced, fixed-gap, reintroduced,
   `last_affected`-only, no-`affected`, no-`ranges`, other-ecosystem;
   report lines for guided, unfixed, and range-less findings).
+- `scan_secrets`: git-history scan (`history=True`) — streams
+  `git log -p` for the path and scans added lines, so a secret
+  committed and later removed is still found (it stays in history
+  until the history is rewritten). Each finding names its commit
+  short-SHA; the header reports commits scanned, capped at the 500
+  most recent (the header says so when the cap cuts the log); JSON
+  output carries a `history` object plus a `commit` per finding.
+  The diff stream is parsed line by line (commit/file/hunk
+  boundaries, new-file line numbers from hunk headers), so a huge
+  history never lands in memory whole; removed lines are never
+  scanned, binary extensions are skipped, and IaC block context is
+  tracked per commit. `.gitignore` is deliberately not applied in
+  history mode — a committed-then-ignored file is exactly what it is
+  for — while `exclude` patterns and the baseline still apply, and
+  `history` rejects `since=`.
+- `tests/test_history_scan.py`: 10 unit tests (secret removed from
+  HEAD still found with the right commit, attribution across
+  commits, clean repo, non-repo error, `history`+`since` conflict,
+  JSON shape, 500-commit truncation, `exclude`, single-file path,
+  secrets across files and commits).
 - `scan_secrets`: IaC credential scan — in Terraform (`.tf`,
   `.tfvars`), CloudFormation, and ARM files, a hardcoded credential
   assignment inside a sensitive resource block (`aws_db_instance` /

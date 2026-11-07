@@ -531,11 +531,14 @@ def _per_file_counts(findings) -> dict:
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0, since=None):
+def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
+                 since=None, history=None):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
-    report, so the JSON is safe to store in CI logs.
+    report, so the JSON is safe to store in CI logs. History-scan
+    findings carry their commit short-SHA, and a history run adds a
+    `history` object with the commit count and truncation flag.
     """
     report = {
         "tool": "scan_secrets",
@@ -553,12 +556,15 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0, sinc
                 "type": f["type"],
                 "severity": f["severity"],
                 "match": _mask(f["secret"]),
+                **({"commit": f["commit"]} if "commit" in f else {}),
             }
             for f in findings
         ],
     }
     if since is not None:
         report["since"] = since
+    if history is not None:
+        report["history"] = history
     return report
 
 
@@ -649,6 +655,107 @@ def _resolve_since(scan_root: str, since: str):
     )
 
 
+MAX_HISTORY_COMMITS = 500  # history scans stop here; the header says so
+
+
+def _scan_history(repo_root: str, pathspec: str, max_commits: int, on_diff_line):
+    """Stream `git log -p` for `pathspec` and call
+    `on_diff_line(commit, file, new_lineno, content, is_added)` for
+    every added (`+`) and context (` `) line, newest commit first.
+
+    Commit boundaries come from `--format=COMMIT %H`, file boundaries
+    from `diff --git` headers, and new-file line numbers from hunk
+    headers, so a huge history never lands in memory whole. Returns
+    (commits_scanned, files_seen, truncated, error): `files_seen` is
+    the set of repo-relative files with diffs, `truncated` is True
+    when the log was cut at `max_commits`, and `error` names the
+    failure when git is unavailable or the log command fails. Stops
+    early when the callback returns False (e.g. the caller hit
+    `max_findings`). C-quoted paths (spaces, non-ASCII names) are
+    unquoted only at the outer level, so an exotic filename may
+    misparse — the finding still names the file git printed.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["git", "-C", repo_root, "log", "-p",
+             "--format=COMMIT %H", "--no-ext-diff", "--", pathspec],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace",
+        )
+    except OSError as exc:
+        return 0, set(), False, f"git log failed: {exc}"
+    commits = 0
+    truncated = False
+    files_seen: set[str] = set()
+    commit = None
+    cur_file = None
+    new_lineno = 0
+    in_hunk = False
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if line.startswith("COMMIT "):
+                if commits >= max_commits:
+                    truncated = True
+                    break
+                parts = line.split(None, 1)
+                commit = parts[1].strip()[:7] if len(parts) > 1 else "?"
+                commits += 1
+                cur_file = None
+                in_hunk = False
+                continue
+            if commit is None:
+                continue
+            if line.startswith("diff --git "):
+                m = re.match(r"^diff --git a/(.*) b/(.*)$", line)
+                if m is not None:
+                    cur_file = m.group(2)
+                    if cur_file.startswith('"') and cur_file.endswith('"'):
+                        cur_file = cur_file[1:-1]
+                    files_seen.add(cur_file)
+                else:
+                    cur_file = None
+                in_hunk = False
+                continue
+            if cur_file is None:
+                continue
+            if line.startswith("@@ "):
+                m = re.search(r"\+(\d+)(?:,\d+)? @@", line)
+                new_lineno = int(m.group(1)) if m else 1
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if line.startswith("Binary files "):
+                in_hunk = False
+                continue
+            if line.startswith("+++ ") or line.startswith("--- "):
+                continue
+            if line.startswith("+"):
+                if on_diff_line(commit, cur_file, new_lineno, line[1:], True) is False:
+                    break
+                new_lineno += 1
+            elif line.startswith(" "):
+                on_diff_line(commit, cur_file, new_lineno, line[1:], False)
+                new_lineno += 1
+            # "-" lines (removals) never advance the new-file line number.
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+    if proc.returncode not in (0, None) and commits == 0:
+        err = ""
+        try:
+            err = (proc.stderr.read() or "").strip()
+        except OSError:
+            pass
+        return 0, set(), False, f"git log failed: {err or proc.returncode}"
+    return commits, files_seen, truncated, None
+
+
 @mcp.tool()
 def scan_secrets(
     path: str,
@@ -657,6 +764,7 @@ def scan_secrets(
     json_output: bool = False,
     baseline: str | None = None,
     since: str | None = None,
+    history: bool = False,
 ) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
@@ -692,6 +800,18 @@ def scan_secrets(
             `"2026-10-01"`, an ISO datetime, or epoch seconds) scans
             only files modified after that time. Anything else is an
             error. Unchanged files are not counted as scanned.
+        history: Scan the git history instead of the working tree:
+            added lines in `git log -p` for the path, so a secret that
+            was committed and later removed is still found (it stays
+            in history until the history itself is rewritten). Each
+            finding names its commit short-SHA; the header reports
+            how many commits were scanned (capped at 500, newest
+            first — the header says so when the cap cuts the log).
+            `.gitignore` is deliberately NOT applied here — a file
+            committed and later ignored is exactly what this mode is
+            for — but `exclude` patterns still skip files, and the
+            baseline still suppresses acknowledged findings. Rejects
+            `since=` (the two modes select different inputs).
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -726,10 +846,25 @@ def scan_secrets(
                                "error": f"path does not exist: {path}"})
         return f"Error: path does not exist: {path}"
 
+    if history and since is not None:
+        error = "history and since cannot be combined: history scans the git log, since selects working-tree files"
+        if json_output:
+            return json.dumps({"tool": "scan_secrets", "path": path,
+                               "error": error})
+        return f"Error: {error}"
+
     exclude_patterns = _parse_exclude(exclude)
 
     files = []
-    if os.path.isfile(path):
+    if history:
+        # No working-tree file collection: the history branch streams
+        # `git log -p` instead. scan_root still anchors relative paths.
+        scan_root = (
+            os.path.dirname(os.path.abspath(path))
+            if os.path.isfile(path)
+            else os.path.abspath(path)
+        )
+    elif os.path.isfile(path):
         # A single file still honours a .gitignore at its own directory.
         scan_root = os.path.dirname(os.path.abspath(path))
         patterns = _load_gitignore(scan_root)
@@ -806,58 +941,133 @@ def scan_secrets(
     sev_counts = {"HIGH": 0, "MED": 0, "LOW": 0}
     suppressed = 0
     scanned = 0
-    for fp in files:
-        try:
-            if os.path.getsize(fp) > MAX_FILE_BYTES:
-                continue
-            with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
-                lines = fh.readlines()
-        except (OSError, UnicodeError):
-            continue
-        scanned += 1
+    history_info = None
 
-        # IaC block context for this file: the resource type currently
-        # open (Terraform: brace-tracked; CFN/ARM: until the next Type;
-        # .tfvars: the whole file, since it holds deployment values).
-        iac_resource = None
-        iac_depth = 0
-        if os.path.splitext(fp)[1].lower() == ".tfvars":
-            iac_resource = "tfvars"
-        for lineno, line in enumerate(lines, start=1):
-            if _is_iac_file(fp):
-                declared = _iac_resource_type(line)
-                if declared is not None:
-                    iac_resource = declared
-                    iac_depth = line.count("{") - line.count("}")
-                elif iac_resource is not None and iac_depth > 0:
-                    iac_depth += line.count("{") - line.count("}")
-                    if iac_depth <= 0:
-                        iac_resource = None
-                        iac_depth = 0
-            iac_hit = _iac_credential_hit(line, fp, iac_resource)
-            hit = (iac_hit or _match_line(line)
-                   or _config_credential_hit(line, fp)
-                   or _entropy_hit(line))
-            if hit:
-                name, severity, secret = hit
-                rel = os.path.relpath(fp, scan_root)
-                if _finding_hash(rel, name, secret) in baseline_hashes:
-                    suppressed += 1
-                    continue
-                sev_counts[severity] += 1
-                findings.append(
-                    {
-                        "file": fp,
-                        "line": lineno,
-                        "type": name,
-                        "severity": severity,
-                        "secret": secret,
-                    }
+    def _record(hit, fp, lineno, commit=None):
+        """Append one matched line as a finding (baseline-suppressed
+        findings only bump the counter). Shared by the working-tree
+        loop and the history branch so both apply the same
+        suppression, severity counts, and finding shape; history
+        findings additionally carry their commit short-SHA."""
+        nonlocal suppressed
+        name, severity, secret = hit
+        rel = os.path.relpath(fp, scan_root)
+        if _finding_hash(rel, name, secret) in baseline_hashes:
+            suppressed += 1
+            return
+        sev_counts[severity] += 1
+        finding = {
+            "file": fp,
+            "line": lineno,
+            "type": name,
+            "severity": severity,
+            "secret": secret,
+        }
+        if commit is not None:
+            finding["commit"] = commit
+        findings.append(finding)
+
+    if history:
+        repo_root = _git_repo_root(scan_root)
+        if repo_root is None:
+            error = "history scan needs a git repository"
+            if json_output:
+                return json.dumps({"tool": "scan_secrets", "path": path,
+                                   "error": error})
+            return f"Error: {error}"
+        pathspec = os.path.relpath(os.path.abspath(path), repo_root)
+        # IaC block context for the current diff: reset whenever the
+        # commit or the file changes, since one commit's hunk window
+        # says nothing about the next commit's block context.
+        hist_state = {"commit": None, "file": None, "resource": None, "depth": 0}
+
+        def _on_diff_line(commit, rel_file, lineno, content, is_added):
+            if _excluded(exclude_patterns, rel_file):
+                return True
+            if os.path.splitext(rel_file)[1].lower() in SKIP_EXTS:
+                return True
+            if hist_state["commit"] != commit or hist_state["file"] != rel_file:
+                hist_state["commit"] = commit
+                hist_state["file"] = rel_file
+                hist_state["resource"] = (
+                    "tfvars"
+                    if os.path.splitext(rel_file)[1].lower() == ".tfvars"
+                    else None
                 )
+                hist_state["depth"] = 0
+            fp = os.path.join(repo_root, rel_file)
+            if _is_iac_file(fp):
+                declared = _iac_resource_type(content)
+                if declared is not None:
+                    hist_state["resource"] = declared
+                    hist_state["depth"] = content.count("{") - content.count("}")
+                elif hist_state["resource"] is not None and hist_state["depth"] > 0:
+                    hist_state["depth"] += content.count("{") - content.count("}")
+                    if hist_state["depth"] <= 0:
+                        hist_state["resource"] = None
+                        hist_state["depth"] = 0
+            if not is_added:
+                return True
+            iac_hit = _iac_credential_hit(content, fp, hist_state["resource"])
+            hit = (iac_hit or _match_line(content)
+                   or _config_credential_hit(content, fp)
+                   or _entropy_hit(content))
+            if hit:
+                _record(hit, fp, lineno, commit)
+            return len(findings) < max_findings
+
+        commits_scanned, files_seen, truncated, history_error = _scan_history(
+            repo_root, pathspec, MAX_HISTORY_COMMITS, _on_diff_line
+        )
+        if history_error is not None:
+            if json_output:
+                return json.dumps({"tool": "scan_secrets", "path": path,
+                                   "error": history_error})
+            return f"Error: {history_error}"
+        scanned = len(files_seen)
+        history_info = {
+            "commits_scanned": commits_scanned,
+            "truncated": truncated,
+        }
+    else:
+        for fp in files:
+            try:
+                if os.path.getsize(fp) > MAX_FILE_BYTES:
+                    continue
+                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.readlines()
+            except (OSError, UnicodeError):
+                continue
+            scanned += 1
+
+            # IaC block context for this file: the resource type currently
+            # open (Terraform: brace-tracked; CFN/ARM: until the next Type;
+            # .tfvars: the whole file, since it holds deployment values).
+            iac_resource = None
+            iac_depth = 0
+            if os.path.splitext(fp)[1].lower() == ".tfvars":
+                iac_resource = "tfvars"
+            for lineno, line in enumerate(lines, start=1):
+                if _is_iac_file(fp):
+                    declared = _iac_resource_type(line)
+                    if declared is not None:
+                        iac_resource = declared
+                        iac_depth = line.count("{") - line.count("}")
+                    elif iac_resource is not None and iac_depth > 0:
+                        iac_depth += line.count("{") - line.count("}")
+                        if iac_depth <= 0:
+                            iac_resource = None
+                            iac_depth = 0
+                iac_hit = _iac_credential_hit(line, fp, iac_resource)
+                hit = (iac_hit or _match_line(line)
+                       or _config_credential_hit(line, fp)
+                       or _entropy_hit(line))
+                if hit:
+                    _record(hit, fp, lineno)
+                if len(findings) >= max_findings:
+                    break
             if len(findings) >= max_findings:
                 break
-        if len(findings) >= max_findings:
-            break
 
     # Repo-wide dedup: one committed key checked into many files is still
     # one secret. Compare raw values (never the masked previews) so a
@@ -866,11 +1076,21 @@ def scan_secrets(
 
     sev_summary = ", ".join(f"{s}: {sev_counts[s]}" for s in ("HIGH", "MED", "LOW"))
     header = (
-        f"Secret scan of {path}\n"
-        f"Files scanned: {scanned}\n"
+        f"Secret scan of {path}"
+        + (" (git history)" if history else "")
+        + f"\nFiles scanned: {scanned}\n"
         f"Findings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
     )
+    if history_info is not None:
+        history_line = (
+            f"\nGit history: {history_info['commits_scanned']} commit(s) scanned"
+        )
+        if history_info["truncated"]:
+            history_line += (
+                f" (limited to the {MAX_HISTORY_COMMITS} most recent)"
+            )
+        header += history_line
     if since is not None:
         header += f"\nIncremental scan: only files changed since {since}"
     if suppressed:
@@ -886,21 +1106,34 @@ def scan_secrets(
     if not findings:
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
-                                           unique, sev_counts, suppressed, since))
+                                           unique, sev_counts, suppressed,
+                                           since, history_info))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
-                                       unique, sev_counts, suppressed, since), indent=2)
-    rendered = "\n\n".join(
-        f"  [{f['severity']}] {f['type']}\n"
-        f"      {f['file']}:{f['line']}\n"
-        f"      match: {_mask(f['secret'])}"
-        for f in findings
-    )
+                                       unique, sev_counts, suppressed,
+                                       since, history_info), indent=2)
+
+    def _render_finding(f):
+        loc = f"{f['file']}:{f['line']}"
+        if "commit" in f:
+            loc += f" (commit {f['commit']})"
+        return (
+            f"  [{f['severity']}] {f['type']}\n"
+            f"      {loc}\n"
+            f"      match: {_mask(f['secret'])}"
+        )
+
+    rendered = "\n\n".join(_render_finding(f) for f in findings)
     note = (
         "\n\nNote: these are heuristic matches and may include false positives. "
         "Rotate any real secret that is committed to source control."
     )
+    if history:
+        note += (
+            " History findings stay in git until the history itself is "
+            "rewritten — removing the file from HEAD is not enough."
+        )
     return header + "\n\n" + rendered + note
 
 
