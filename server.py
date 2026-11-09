@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import random
 import subprocess
+import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime
 from functools import cmp_to_key
@@ -1224,6 +1225,68 @@ def _parse_go_mod(text: str):
                 yield parts[0], parts[1]
 
 
+def _parse_pom_xml(text: str):
+    """Yield (group:artifact, version) for `<dependency>` entries in a
+    Maven `pom.xml`.
+
+    OSV's Maven ecosystem names a package `groupId:artifactId`, so that
+    is the name yielded here. Only the project's own `<dependencies>`
+    block is read — `<dependencyManagement>` entries are version-only
+    declarations, not dependencies, and are skipped. A version written
+    as a property reference (`${spring.version}`) is resolved from the
+    POM's `<properties>` block when possible; references that cannot be
+    resolved (including inherited parent versions, which live outside
+    this file) are skipped rather than queried with a placeholder.
+    Dependencies without a version are skipped the same way. Malformed
+    XML yields nothing, so a broken POM never breaks the audit.
+    Namespace-agnostic: Maven POMs declare the
+    `http://maven.apache.org/POM/4.0.0` namespace, and namespace-free
+    POMs must parse the same way.
+    """
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return
+
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    def children(elem, name: str):
+        return [c for c in elem if local(c.tag) == name]
+
+    def text_of(elem, name: str):
+        found = children(elem, name)
+        if not found or found[0].text is None:
+            return None
+        return found[0].text.strip()
+
+    properties = {}
+    for props in children(root, "properties"):
+        for prop in props:
+            if prop.text is not None:
+                properties[local(prop.tag)] = prop.text.strip()
+
+    def resolve(value: str) -> str | None:
+        def repl(match):
+            name = match.group(1)
+            return properties.get(name, match.group(0))
+
+        resolved = re.sub(r"\$\{([^}]+)\}", repl, value)
+        return None if "${" in resolved else resolved
+
+    for deps_block in children(root, "dependencies"):
+        for dep in children(deps_block, "dependency"):
+            group = text_of(dep, "groupId")
+            artifact = text_of(dep, "artifactId")
+            version = text_of(dep, "version")
+            if not group or not artifact or not version:
+                continue
+            version = resolve(version)
+            if version is None:
+                continue
+            yield f"{group}:{artifact}", version
+
+
 def _parse_package_lock(text: str):
     """Yield (name, version) pairs from a `package-lock.json`.
 
@@ -1531,8 +1594,9 @@ def _dedupe_deps(deps: list) -> tuple[list, int]:
 async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
 
-    Supports Python (requirements.txt), npm (package.json), and Go
-    modules (go.mod). Only pinned/exact versions are checked. Lockfiles
+    Supports Python (requirements.txt), npm (package.json), Go
+    modules (go.mod), and Maven (pom.xml). Only pinned/exact versions
+    are checked. Lockfiles
     resolve transitive dependencies too: `package-lock.json` (npm),
     `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) — so a
     vulnerability in a dependency-of-a-dependency is caught even when
@@ -1545,8 +1609,8 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     query; a failed batch counts every dep as a lookup failure).
 
     Args:
-        path: Path to a requirements.txt, package.json, go.mod, or
-            lockfile (package-lock.json, poetry.lock, Cargo.lock).
+        path: Path to a requirements.txt, package.json, go.mod, pom.xml,
+            or lockfile (package-lock.json, poetry.lock, Cargo.lock).
         min_severity: Optional severity floor ("LOW", "MEDIUM"/"MED",
             "HIGH", "CRITICAL", any case). Vulnerabilities below the
             floor are hidden from the report and counted in the header,
@@ -1600,13 +1664,16 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     elif name_lower == "go.mod":
         ecosystem = "Go"
         deps = list(_parse_go_mod(text))
+    elif name_lower == "pom.xml":
+        ecosystem = "Maven"
+        deps = list(_parse_pom_xml(text))
     elif "requirements" in name_lower or name_lower.endswith(".txt"):
         ecosystem = "PyPI"
         deps = list(_parse_requirements(text))
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
-            "Provide a requirements.txt, package.json, go.mod, "
+            "Provide a requirements.txt, package.json, go.mod, pom.xml, "
             "package-lock.json, poetry.lock, or Cargo.lock."
         )
 
@@ -1614,7 +1681,8 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
         return (
             f"No pinned dependencies found in {path}. "
             '(Only exact versions are checked: "pkg==1.2.3" for pip, '
-            '"1.2.3" for npm, or a go.mod require line; lockfiles '
+            '"1.2.3" for npm, a go.mod require line, or a pom.xml '
+            "dependency with a groupId, artifactId, and version; lockfiles "
             "contribute every package entry they contain.)"
         )
 

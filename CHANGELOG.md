@@ -6,6 +6,18 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: Maven support — a `pom.xml` is parsed for its
+  `<dependencies>` (groupId:artifactId:version, the OSV Maven package
+  name) and queried against the Maven ecosystem. Versions written as
+  `${property}` references are resolved from the POM's `<properties>`
+  block when possible; unresolvable references, unversioned entries,
+  and `<dependencyManagement>` declarations are skipped rather than
+  queried with a placeholder, and malformed XML yields no dependencies.
+- `tests/test_maven_pom.py`: 11 unit tests (namespaced and
+  namespace-free POMs, property resolution, dependencyManagement /
+  unversioned / unresolvable skipping, malformed XML, Maven-ecosystem
+  querybatch payload, vuln reporting, empty-POM message, unsupported
+  manifest message naming `pom.xml`).
 - `audit_dependencies`: fixed-version guidance — each reported
   vulnerability now reads "upgrade to >= X" (the lowest version that
   closes every OSV `affected` range for the queried version) or "no
