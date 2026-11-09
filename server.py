@@ -36,6 +36,7 @@ import hashlib
 import random
 import subprocess
 import xml.etree.ElementTree as ET
+from urllib.parse import unquote
 from collections import Counter
 from datetime import datetime
 from functools import cmp_to_key
@@ -1287,6 +1288,103 @@ def _parse_pom_xml(text: str):
             yield f"{group}:{artifact}", version
 
 
+# Package-URL type -> OSV ecosystem, for CycloneDX SBOM components.
+_PURL_ECOSYSTEMS = {
+    "maven": "Maven",
+    "npm": "npm",
+    "pypi": "PyPI",
+    "golang": "Go",
+    "cargo": "crates.io",
+}
+
+# Filenames that mark a JSON file as a CycloneDX SBOM even when it
+# omits the `bomFormat` field.
+_SBOM_FILENAMES = ("sbom.json", "cyclonedx.json", "bom.json")
+
+
+def _parse_purl(purl: str):
+    """(name, version, ecosystem) for a package URL, or None when the
+    purl is malformed, has no version, or names an ecosystem GuardX
+    does not query.
+
+    `pkg:maven/org.apache.commons/commons-lang3@3.12.0` becomes
+    `org.apache.commons:commons-lang3` (the OSV Maven package name),
+    `pkg:npm/%40angular/core@16.0.0` becomes `@angular/core` (scoped
+    npm names are URL-decoded), and
+    `pkg:golang/github.com/gin-gonic/gin@v1.9.1` keeps its `v` prefix —
+    OSV's Go ecosystem normalises it. Qualifiers (`?...`) and subpaths
+    (`#...`) never affect a package's identity and are stripped.
+    """
+    if not isinstance(purl, str) or not purl.startswith("pkg:"):
+        return None
+    rest = re.split(r"[?#]", purl[4:], maxsplit=1)[0]
+    ptype, slash, path = rest.partition("/")
+    if not slash:
+        return None
+    ecosystem = _PURL_ECOSYSTEMS.get(ptype.lower())
+    if ecosystem is None:
+        return None
+    if "@" not in path:
+        return None
+    path, _, version = path.rpartition("@")
+    version = unquote(version)
+    if not version:
+        return None
+    segments = [unquote(s) for s in path.split("/") if s]
+    if not segments:
+        return None
+    name = segments[-1]
+    namespace = "/".join(segments[:-1])
+    if not name:
+        return None
+    ptype = ptype.lower()
+    if ptype == "maven":
+        name = f"{namespace}:{name}" if namespace else name
+    elif ptype in ("golang", "npm"):
+        name = f"{namespace}/{name}" if namespace else name
+    return name, version, ecosystem
+
+
+def _is_cyclonedx(data, name_lower: str) -> bool:
+    """True when parsed JSON is a CycloneDX SBOM: a `bomFormat`
+    of "CycloneDX" says so outright, and a file named like an SBOM
+    (`sbom.json`, `cyclonedx.json`, `bom.json`, `*.cdx.json`) with a
+    `components` list counts too, for exporters that omit the field.
+    Anything else — a package.json with an incidental `components`
+    key, for example — is not an SBOM."""
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("bomFormat", "")).lower() == "cyclonedx":
+        return True
+    if name_lower in _SBOM_FILENAMES or name_lower.endswith(".cdx.json"):
+        return isinstance(data.get("components"), list)
+    return False
+
+
+def _parse_cyclonedx_sbom(data):
+    """Yield (name, version, ecosystem) for the components of a parsed
+    CycloneDX SBOM.
+
+    Each component is identified by its package URL (`purl`), which
+    carries both the ecosystem and the canonical package name — so one
+    SBOM can mix Maven, npm, PyPI, Go, and crates.io components and
+    each is queried against its own ecosystem. Components without a
+    purl (or with an unsupported purl type, or no version) are skipped
+    rather than guessed at: without a purl there is no reliable way to
+    tell which ecosystem a bare name belongs to. The SBOM's own root
+    component (`metadata.component`) is the audited project itself,
+    not a dependency, and is not yielded."""
+    components = data.get("components") if isinstance(data, dict) else None
+    if not isinstance(components, list):
+        return
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        parsed = _parse_purl(comp.get("purl"))
+        if parsed is not None:
+            yield parsed
+
+
 def _parse_package_lock(text: str):
     """Yield (name, version) pairs from a `package-lock.json`.
 
@@ -1600,17 +1698,23 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     resolve transitive dependencies too: `package-lock.json` (npm),
     `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) — so a
     vulnerability in a dependency-of-a-dependency is caught even when
-    the direct manifest never names it. The same package@version is
-    queried against OSV only once per run: duplicate manifest entries
-    are served from a per-run cache and counted in the header. All
-    distinct dependencies are queried in a single `POST /v1/querybatch`
-    call instead of one query per package, so a large manifest costs
-    one round trip (with the same 429 retry behaviour as a single
+    the direct manifest never names it. A CycloneDX SBOM (a JSON file
+    with `bomFormat: CycloneDX`, or named `sbom.json`, `cyclonedx.json`,
+    `bom.json`, or `*.cdx.json`) is audited too: each component is
+    identified by its package URL, so one SBOM can mix Maven, npm,
+    PyPI, Go, and crates.io components and each is queried against its
+    own ecosystem. The same package@version is queried against OSV
+    only once per run: duplicate manifest entries are served from a
+    per-run cache and counted in the header. All distinct dependencies
+    are queried in one `POST /v1/querybatch` call per ecosystem instead
+    of one query per package, so a large manifest costs one round trip
+    per ecosystem (with the same 429 retry behaviour as a single
     query; a failed batch counts every dep as a lookup failure).
 
     Args:
         path: Path to a requirements.txt, package.json, go.mod, pom.xml,
-            or lockfile (package-lock.json, poetry.lock, Cargo.lock).
+            lockfile (package-lock.json, poetry.lock, Cargo.lock), or
+            CycloneDX SBOM (.json).
         min_severity: Optional severity floor ("LOW", "MEDIUM"/"MED",
             "HIGH", "CRITICAL", any case). Vulnerabilities below the
             floor are hidden from the report and counted in the header,
@@ -1649,58 +1753,82 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     with open(path, "r", encoding="utf-8", errors="ignore") as fh:
         text = fh.read()
 
+    # Every input normalises to (name, version, ecosystem) triples, so
+    # a multi-ecosystem SBOM flows through the same query/report path
+    # as a single-ecosystem manifest.
+    triples: list[tuple[str, str, str]] = []
     if name_lower == "package-lock.json":
-        ecosystem = "npm"
-        deps = list(_parse_package_lock(text))
+        triples = [(n, v, "npm") for n, v in _parse_package_lock(text)]
     elif name_lower == "poetry.lock":
-        ecosystem = "PyPI"
-        deps = list(_parse_toml_lock(text))
+        triples = [(n, v, "PyPI") for n, v in _parse_toml_lock(text)]
     elif name_lower == "cargo.lock":
-        ecosystem = "crates.io"
-        deps = list(_parse_toml_lock(text))
+        triples = [(n, v, "crates.io") for n, v in _parse_toml_lock(text)]
     elif name_lower.endswith("package.json"):
-        ecosystem = "npm"
-        deps = list(_parse_package_json(text))
+        triples = [(n, v, "npm") for n, v in _parse_package_json(text)]
     elif name_lower == "go.mod":
-        ecosystem = "Go"
-        deps = list(_parse_go_mod(text))
+        triples = [(n, v, "Go") for n, v in _parse_go_mod(text)]
     elif name_lower == "pom.xml":
-        ecosystem = "Maven"
-        deps = list(_parse_pom_xml(text))
+        triples = [(n, v, "Maven") for n, v in _parse_pom_xml(text)]
     elif "requirements" in name_lower or name_lower.endswith(".txt"):
-        ecosystem = "PyPI"
-        deps = list(_parse_requirements(text))
+        triples = [(n, v, "PyPI") for n, v in _parse_requirements(text)]
+    elif name_lower.endswith(".json"):
+        try:
+            sbom_data = json.loads(text)
+        except json.JSONDecodeError:
+            sbom_data = None
+        if sbom_data is not None and _is_cyclonedx(sbom_data, name_lower):
+            triples = list(_parse_cyclonedx_sbom(sbom_data))
+        else:
+            return (
+                f"Unsupported manifest: {name_lower}. "
+                "Provide a requirements.txt, package.json, go.mod, pom.xml, "
+                "package-lock.json, poetry.lock, Cargo.lock, or a "
+                "CycloneDX SBOM (.json)."
+            )
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
             "Provide a requirements.txt, package.json, go.mod, pom.xml, "
-            "package-lock.json, poetry.lock, or Cargo.lock."
+            "package-lock.json, poetry.lock, Cargo.lock, or a "
+            "CycloneDX SBOM (.json)."
         )
 
-    if not deps:
+    if not triples:
         return (
             f"No pinned dependencies found in {path}. "
             '(Only exact versions are checked: "pkg==1.2.3" for pip, '
             '"1.2.3" for npm, a go.mod require line, or a pom.xml '
             "dependency with a groupId, artifactId, and version; lockfiles "
-            "contribute every package entry they contain.)"
+            "contribute every package entry they contain; SBOM components "
+            "need a package URL with a supported ecosystem and a version.)"
         )
 
-    deps = deps[:MAX_DEPS]
-    unique_deps, cache_hits = _dedupe_deps(deps)
+    triples = triples[:MAX_DEPS]
+    unique_triples, cache_hits = _dedupe_deps(triples)
+
+    # Group by ecosystem (first-seen order) — one querybatch call per
+    # ecosystem, since a batch carries a single ecosystem per query.
+    groups: dict[str, list] = {}
+    for name, version, eco in unique_triples:
+        groups.setdefault(eco, []).append((name, version))
 
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}
     ) as client:
-        # One querybatch call for the whole manifest, not one query
-        # per package — large manifests cost one round trip.
-        results = await _osv_querybatch(client, unique_deps, ecosystem)
+        # One querybatch call per ecosystem, not one query per package
+        # — large manifests cost one round trip per ecosystem.
+        results = []
+        for eco, eco_deps in groups.items():
+            for name, version, vulns in await _osv_querybatch(
+                client, eco_deps, eco
+            ):
+                results.append((name, version, vulns, eco))
 
     vuln_blocks = []
     errors = 0
     vuln_pkgs = 0
     filtered_out = 0
-    for name, version, vulns in results:
+    for name, version, vulns, eco in results:
         if vulns is None:
             errors += 1
             continue
@@ -1723,7 +1851,7 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             summary = v.get("summary", "").strip()
             tag = f" [{label} {score:g}]" if score is not None else f" [{label}]"
             vuln_label = f"{vid}" + (f" ({aliases})" if aliases else "") + tag
-            fixed, unfixed = _vuln_fixed_versions(v, version, ecosystem)
+            fixed, unfixed = _vuln_fixed_versions(v, version, eco)
             if fixed:
                 # The highest fixed version closes every affected range.
                 guidance = f" — upgrade to >= {fixed[-1]}"
@@ -1740,10 +1868,12 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             f"  [!] {name}=={version}  -> {len(kept)} known vuln(s)\n" + "\n".join(ids)
         )
 
+    ecosystems = list(groups)
+    eco_label = "Ecosystem" if len(ecosystems) == 1 else "Ecosystems"
     header = (
         f"Dependency audit of {path}\n"
-        f"Ecosystem: {ecosystem}\n"
-        f"Dependencies checked: {len(unique_deps)}\n"
+        f"{eco_label}: {', '.join(ecosystems)}\n"
+        f"Dependencies checked: {len(unique_triples)}\n"
         f"Vulnerable packages: {vuln_pkgs}"
     )
     if min_label is not None:

@@ -6,6 +6,25 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: CycloneDX SBOM input — a JSON file with
+  `bomFormat: CycloneDX`, or named `sbom.json`, `cyclonedx.json`,
+  `bom.json`, or `*.cdx.json`, is audited from its `components`:
+  each component is identified by its package URL (`pkg:maven/...`,
+  `pkg:npm/...`, `pkg:pypi/...`, `pkg:golang/...`, `pkg:cargo/...`),
+  so one SBOM can mix ecosystems and each component is queried
+  against its own (one querybatch call per ecosystem; the header
+  lists them all as `Ecosystems:`). Components without a purl, with
+  an unsupported purl type, or without a version are skipped rather
+  than guessed at, and the SBOM's own root component
+  (`metadata.component`) is not audited. All inputs now normalise to
+  (name, version, ecosystem) triples, so the multi-ecosystem path
+  shares the single-ecosystem query/report code.
+- `tests/test_cyclonedx_sbom.py`: 13 unit tests (mixed-ecosystem
+  parsing, scoped npm names, Go `v` prefix, purl qualifiers/subpath,
+  root-component exclusion, bad-purl rejection, SBOM detection by
+  `bomFormat` and by filename, per-ecosystem querybatch calls, vuln
+  reporting with fixed-version guidance, empty-SBOM message,
+  non-SBOM JSON and malformed JSON rejection).
 - `audit_dependencies`: Maven support — a `pom.xml` is parsed for its
   `<dependencies>` (groupId:artifactId:version, the OSV Maven package
   name) and queried against the Maven ecosystem. Versions written as
