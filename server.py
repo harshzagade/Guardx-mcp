@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import random
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote
 from collections import Counter
@@ -1902,6 +1903,14 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
 
 HIBP_RANGE = "https://api.pwnedpasswords.com/range/"
 HIBP_MAX_ATTEMPTS = 3  # initial request + 2 retries on transient network failures
+HIBP_CACHE_TTL_SECONDS = 300  # 5 min: breach counts change slowly, so a
+# short cache is safe and saves repeat range requests in the long-lived
+# server process (e.g. a batch re-checked, or the same password checked
+# twice in a row).
+# prefix -> (expires_at_monotonic, {suffix: breach count}). In-memory
+# only: a server restart starts cold. Error responses are never cached,
+# so a failed lookup is retried on the next call.
+_HIBP_PREFIX_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
 
 
 async def _hibp_suffix_counts(client, prefix: str):
@@ -1913,7 +1922,15 @@ async def _hibp_suffix_counts(client, prefix: str):
     2s); HTTP error statuses are not retried. Malformed response lines
     are ignored, matching the single-check parser. Returns (None,
     error_string) on failure.
+
+    Successful responses are cached per prefix for
+    `HIBP_CACHE_TTL_SECONDS`, so repeated checks of passwords sharing
+    a prefix skip the network entirely until the entry expires.
     """
+    cached = _HIBP_PREFIX_CACHE.get(prefix)
+    if cached is not None and cached[0] > time.monotonic():
+        return cached[1], None
+
     resp = None
     for attempt in range(HIBP_MAX_ATTEMPTS):
         try:
@@ -1939,6 +1956,8 @@ async def _hibp_suffix_counts(client, prefix: str):
             counts[h.strip().upper()] = int(c.strip())
         except ValueError:
             continue
+    _HIBP_PREFIX_CACHE[prefix] = (
+        time.monotonic() + HIBP_CACHE_TTL_SECONDS, counts)
     return counts, None
 
 
@@ -1958,6 +1977,9 @@ async def check_pwned_password(password: str) -> str:
         Transient network failures (`httpx.RequestError`) are retried
         twice with full-jitter backoff (up to 1s, then up to 2s) before
         reporting an error; HTTP error statuses are not retried.
+        Successful range responses are cached per hash prefix for 5
+        minutes, so re-checking the same password (or another sharing
+        its prefix) skips the network.
     """
     if not password:
         return "Error: empty password."
@@ -1995,10 +2017,12 @@ async def check_pwned_passwords(passwords: list[str]) -> str:
     found locally. Passwords sharing a hash prefix are looked up once —
     one range request per distinct prefix, in first-seen order — so a
     batch with duplicate or prefix-colliding entries costs fewer
-    requests than one call per password. Each password still gets its
-    own summary line, and per-prefix lookup failures (network or HTTP
-    error) are reported on that prefix's lines instead of failing the
-    whole batch.
+    requests than one call per password. Successful range responses are
+    also cached per prefix for 5 minutes, so a later call re-checking
+    any of these passwords skips the network. Each password still gets
+    its own summary line, and per-prefix lookup failures (network or
+    HTTP error) are reported on that prefix's lines instead of failing
+    the whole batch.
 
     Args:
         passwords: The passwords to check.

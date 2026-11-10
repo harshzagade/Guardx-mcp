@@ -17,6 +17,16 @@ actual git history — no invented features.
   without password, host:port, plain URL) for the new pattern, plus a
   scan-level test in `tests/test_scan_secrets.py` proving the finding
   is reported HIGH end to end.
+- In-memory HIBP prefix cache: successful `check_pwned_password` /
+  `check_pwned_passwords` range responses are cached per SHA-1 prefix
+  for 5 minutes (`HIBP_CACHE_TTL_SECONDS`), so repeated checks of
+  passwords sharing a prefix skip the network entirely until the
+  entry expires; error responses are never cached. In-memory only, so
+  a server restart starts cold.
+- `tests/test_hibp_cache.py`: 6 unit tests (repeat check served from
+  cache, distinct prefixes each fetched once, pre-seeded fresh entry
+  honoured, expired entry refetched, 503 not cached, batch lookup
+  reused by a later single check).
 - `audit_dependencies`: CycloneDX SBOM input — a JSON file with
   `bomFormat: CycloneDX`, or named `sbom.json`, `cyclonedx.json`,
   `bom.json`, or `*.cdx.json`, is audited from its `components`:
