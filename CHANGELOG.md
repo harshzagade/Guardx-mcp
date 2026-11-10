@@ -6,6 +6,17 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: "Credential in URL" pattern — a HIGH finding for
+  `scheme://user:password@host` strings (`https`, `ftp`, `ssh`,
+  `postgres`/`postgresql`, `mysql`, `mongodb`/`mongodb+srv`, `redis`,
+  `amqp`), a credential form no earlier pattern covered. Plain URLs,
+  userinfo without a password (`https://user@host`), and host:port
+  forms stay clean.
+- `tests/test_pattern_suite.py`: true-positive cases (Postgres,
+  HTTPS git remote, MongoDB+SRV) and false-positive cases (userinfo
+  without password, host:port, plain URL) for the new pattern, plus a
+  scan-level test in `tests/test_scan_secrets.py` proving the finding
+  is reported HIGH end to end.
 - `audit_dependencies`: CycloneDX SBOM input — a JSON file with
   `bomFormat: CycloneDX`, or named `sbom.json`, `cyclonedx.json`,
   `bom.json`, or `*.cdx.json`, is audited from its `components`:

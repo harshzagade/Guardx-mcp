@@ -207,6 +207,20 @@ CASES = {
             'sendgrid_key = "SG.' + "a" * 22 + '"',  # missing second part
         ],
     ),
+    "Credential in URL": (
+        "HIGH",
+        [
+            'DATABASE_URL=postgres://appuser:P4ssw0rd!@db.example.com:5432/prod',
+            'remote = "https://deploy:hunter2@example.com/repo.git"',
+            'uri = "mongodb+srv://reader:Str0ngPass@cluster0.example.net/db"',
+        ],
+        [
+            'url = "https://user@example.com/repo.git"',  # userinfo, no password
+            'homepage = "https://example.com:8080/docs"',  # host:port, no userinfo
+            'db = "postgres://localhost:5432/mydb"',  # host:port, no @ at all
+            'url = "https://example.com/path/to/page"',  # plain URL
+        ],
+    ),
     "Private Key Block": (
         "HIGH",
         [

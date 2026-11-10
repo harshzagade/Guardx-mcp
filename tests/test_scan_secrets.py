@@ -117,6 +117,16 @@ class TestSeverityGrading:
         assert "[HIGH] Private Key Block" in report
         assert "HIGH: 1" in report
 
+    def test_credential_in_url_is_high(self, tmp_path):
+        fp = _write(
+            tmp_path, "config.py",
+            'DATABASE_URL = "postgres://appuser:P4ssw0rd!@db.example.com:5432/prod"\n'
+            'homepage = "https://example.com:8080/docs"\n'
+        )
+        report = server.scan_secrets(fp)
+        assert "[HIGH] Credential in URL" in report
+        assert "Findings: 1 (HIGH: 1, MED: 0, LOW: 0)" in report
+
     def test_generic_assignment_is_medium(self, tmp_path):
         fp = _write(
             tmp_path, "config.py",

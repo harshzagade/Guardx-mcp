@@ -109,6 +109,13 @@ SECRET_PATTERNS = {
         "HIGH",
         re.compile(r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{30,}\b"),
     ),
+    "Credential in URL": (
+        "HIGH",
+        re.compile(
+            r"(?i)\b(?:https?|ftp|ssh|postgres(?:ql)?|mysql|mongodb(?:\+srv)?"
+            r"|redis|amqp)://[^\s/'\":@]+:[^\s/'\"@]+@[^\s/'\"@]+"
+        ),
+    ),
     "Private Key Block": (
         "HIGH",
         re.compile(
