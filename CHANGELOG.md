@@ -6,6 +6,15 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: "Unique secrets by file" listing — the header now maps
+  each distinct secret value (masked preview) to the files it appears in
+  with its finding count, most-copied secret first, so a key committed in
+  twelve files is one line to rotate instead of twelve; mirrored as
+  `unique_secret_files` in JSON output. Grouping is on the raw value, so
+  two secrets that mask identically still list separately.
+- `tests/test_unique_secret_files.py`: 7 unit tests (shared secret lists
+  both files, most-copied first, same file listed once, identical masks
+  stay separate, clean scans carry no block, JSON shape + empty case).
 - `scan_secrets`: "Credential in URL" pattern — a HIGH finding for
   `scheme://user:password@host` strings (`https`, `ftp`, `ssh`,
   `postgres`/`postgresql`, `mysql`, `mongodb`/`mongodb+srv`, `redis`,

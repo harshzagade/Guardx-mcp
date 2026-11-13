@@ -541,6 +541,38 @@ def _per_file_counts(findings) -> dict:
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def _unique_secret_files(findings) -> list:
+    """Return one record per distinct secret value: masked preview, type,
+    severity, the sorted files it appears in, and its finding count.
+
+    Grouping is on the raw value (never the masked preview) so two
+    secrets that mask identically still list separately. The type and
+    severity come from the first occurrence — a value reported under
+    different types in different files keeps its first one. Sorted by
+    finding count descending (the most widely copied secret first),
+    then masked preview, so the order is deterministic."""
+    grouped = {}
+    for f in findings:
+        entry = grouped.setdefault(
+            f["secret"],
+            {"type": f["type"], "severity": f["severity"],
+             "files": set(), "count": 0},
+        )
+        entry["files"].add(f["file"])
+        entry["count"] += 1
+    records = [
+        {
+            "match": _mask(secret),
+            "type": entry["type"],
+            "severity": entry["severity"],
+            "files": sorted(entry["files"]),
+            "findings": entry["count"],
+        }
+        for secret, entry in grouped.items()
+    ]
+    return sorted(records, key=lambda r: (-r["findings"], r["match"]))
+
+
 def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
                  since=None, history=None):
     """Build the machine-readable `scan_secrets` report dict.
@@ -558,6 +590,7 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
         "unique_secrets": unique,
         "severity_counts": dict(sev_counts),
         "per_file_counts": _per_file_counts(findings),
+        "unique_secret_files": _unique_secret_files(findings),
         "suppressed_count": suppressed,
         "findings": [
             {
@@ -834,7 +867,11 @@ def scan_secrets(
         ("Per-file findings"), most-affected file first, so triage can
         start where the findings cluster without counting the detail
         section by hand; the same map appears as `per_file_counts` in
-        JSON output. Lines no known pattern matches are also checked
+        JSON output. A "Unique secrets by file" list follows it, mapping
+        each distinct secret value (masked preview) to the files it
+        appears in with its finding count — so a key copied across
+        twelve files is one line to rotate, not twelve — mirrored as
+        `unique_secret_files` in JSON output. Lines no known pattern matches are also checked
         for long high-entropy quoted strings (at least 20 characters,
         Shannon entropy at least 4.0 bits/char), reported as LOW
         "High-Entropy String" findings — a catch for custom token
@@ -1112,6 +1149,12 @@ def scan_secrets(
         per_file = _per_file_counts(findings)
         header += "\nPer-file findings:\n" + "\n".join(
             f"  {fp}: {n}" for fp, n in per_file.items()
+        )
+        header += "\nUnique secrets by file:\n" + "\n".join(
+            f"  {rec['match']} [{rec['severity']} {rec['type']}]: "
+            f"{', '.join(rec['files'])} "
+            f"({rec['findings']} finding{'s' if rec['findings'] != 1 else ''})"
+            for rec in _unique_secret_files(findings)
         )
     if not findings:
         if json_output:

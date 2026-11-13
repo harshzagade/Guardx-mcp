@@ -220,10 +220,12 @@ class TestExcludeFlag:
         report = server.scan_secrets(root, exclude="fixtures/*")
         assert "src/fixtures/bad.py" in report
         # Only the nested file is reported, but its name now appears
-        # twice: once in the per-file header block, once in the detail
-        # section. The per-file block itself has exactly that one entry.
-        assert report.count("bad.py") == 2
-        per_file = report.split("Per-file findings:")[1].split("\n\n")[0]
+        # three times: once in the per-file header block, once in the
+        # unique-secrets-by-file block, and once in the detail section.
+        # The per-file block itself has exactly that one entry.
+        assert report.count("bad.py") == 3
+        per_file = report.split("Per-file findings:")[1].split(
+            "Unique secrets by file:")[0]
         assert per_file.strip().endswith("src/fixtures/bad.py: 1")
         assert "Findings: 1" in report
 

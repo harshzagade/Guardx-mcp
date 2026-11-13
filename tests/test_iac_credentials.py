@@ -121,7 +121,12 @@ class TestTerraform:
                     '  password = "hunter2"\n'
                     '}\n')
         report = server.scan_secrets(fp)
-        assert report.count("IaC Credential") == 1
+        # The finding type also appears in the header's unique-secrets
+        # block, so count it in the detail section only: exactly one
+        # IaC Credential finding (the db-block line), not the output
+        # block's line.
+        detail = report.split("\n\n", 1)[1]
+        assert detail.count("IaC Credential") == 1
 
     def test_reference_and_placeholder_values_skipped(self, tmp_path):
         fp = _write(tmp_path, "main.tf",
