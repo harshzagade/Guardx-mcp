@@ -15,6 +15,17 @@ actual git history — no invented features.
 - `tests/test_unique_secret_files.py`: 7 unit tests (shared secret lists
   both files, most-copied first, same file listed once, identical masks
   stay separate, clean scans carry no block, JSON shape + empty case).
+- Pre-commit hook example: `examples/pre-commit` scans staged files
+  with `scan_secrets` and blocks the commit on any HIGH finding (file,
+  line, type and masked match in the error); MED/LOW findings only warn
+  unless `GUARDX_STRICT=1`. Finds GuardX via `$GUARDX_HOME` (or
+  `~/guardx-mcp`), stubs `httpx`/`mcp` when they are not installed so
+  the hook stays stdlib-only, honours `.guardx-baseline`, and scans only
+  staged files. End-to-end verified in a scratch repo: a staged GitHub
+  token blocks the commit, a clean file commits.
+- `tests/test_pre_commit_hook.py`: 8 unit tests (clean pass, HIGH blocks
+  and names the file, unstaged secret ignored, MED warns, strict mode
+  blocks MED, nothing staged, missing server, non-repo skip).
 - `scan_secrets`: "Credential in URL" pattern — a HIGH finding for
   `scheme://user:password@host` strings (`https`, `ftp`, `ssh`,
   `postgres`/`postgresql`, `mysql`, `mongodb`/`mongodb+srv`, `redis`,

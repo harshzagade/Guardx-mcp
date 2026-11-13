@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""GuardX pre-commit hook — block commits that stage HIGH-severity secrets.
+
+Install into any repository you want protected::
+
+    cp examples/pre-commit /path/to/your-repo/.git/hooks/pre-commit
+    chmod +x /path/to/your-repo/.git/hooks/pre-commit
+
+The hook needs to find this project's ``server.py``. It looks in
+``$GUARDX_HOME`` first, then ``~/guardx-mcp``; set ``GUARDX_HOME`` to the
+GuardX checkout if you keep it elsewhere. The hook itself is
+stdlib-only: if ``httpx`` / ``mcp`` are not installed it stubs them
+before loading the scanner (the secret scan never touches the network),
+so no ``pip install`` is needed just to run the hook.
+
+Behaviour:
+  * Only staged files are scanned (``git diff --cached --name-only``),
+    so an uncommitted scratch secret in your worktree never blocks you.
+  * Any HIGH finding blocks the commit (exit 1) and names the file,
+    line, type, and masked match.
+  * MED/LOW findings only warn; set ``GUARDX_STRICT=1`` to block on
+    those too.
+  * A ``.guardx-baseline`` next to a staged file still suppresses
+    acknowledged findings, exactly like a normal ``scan_secrets`` run.
+
+Caveat: the hook scans the file as it sits in your worktree, not the
+exact staged blob. If you edited a file after ``git add``, re-stage
+before committing so the scan matches what is about to be committed.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import types
+
+# Severities that block the commit by default; GUARDX_STRICT=1 adds the rest.
+BLOCKING_SEVERITIES = ("HIGH",)
+ALL_SEVERITIES = ("HIGH", "MED", "LOW")
+
+
+def _find_server() -> str | None:
+    """Locate GuardX's server.py, or return None with a hint printed."""
+    candidates = []
+    env_home = os.environ.get("GUARDX_HOME")
+    if env_home:
+        candidates.append(os.path.join(env_home, "server.py"))
+    candidates.append(os.path.join(os.path.expanduser("~"), "guardx-mcp",
+                                   "server.py"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _stub_optional_deps() -> None:
+    """Stub `httpx` / `mcp` when they are not installed.
+
+    The secret scanner is stdlib-only — only the OSV/HIBP tools need
+    `httpx` and only the MCP entry point needs `mcp` — so the hook
+    installs the same minimal stubs the test suite uses instead of
+    demanding a `pip install` before every commit. Real installs are
+    left untouched. (A module already in `sys.modules` — a real import
+    or a test stub — is never replaced; `find_spec` raises ValueError
+    for such a stub, so that is treated as "already handled".)
+    """
+    for name in ("httpx", "mcp"):
+        if name in sys.modules:
+            continue
+        try:
+            installed = importlib.util.find_spec(name) is not None
+        except ValueError:
+            installed = False
+        if installed:
+            continue
+        if name == "httpx":
+            _stub_httpx()
+        else:
+            _stub_mcp()
+
+
+def _stub_httpx() -> None:
+    httpx = types.ModuleType("httpx")
+
+    class RequestError(Exception):
+        pass
+
+    class AsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "httpx is not installed; network tools are unavailable")
+
+    httpx.RequestError = RequestError
+    httpx.AsyncClient = AsyncClient
+    sys.modules["httpx"] = httpx
+
+
+def _stub_mcp() -> None:
+    mcp = types.ModuleType("mcp")
+    server_pkg = types.ModuleType("mcp.server")
+    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
+
+    class FastMCP:
+        def __init__(self, name: str):
+            self.name = name
+
+        def tool(self):
+            def deco(fn):
+                return fn
+            return deco
+
+        prompt = tool
+
+        def run(self):
+            raise AssertionError("mcp is not installed")
+
+    fastmcp_mod.FastMCP = FastMCP
+    server_pkg.fastmcp = fastmcp_mod
+    mcp.server = server_pkg
+    sys.modules["mcp"] = mcp
+    sys.modules["mcp.server"] = server_pkg
+    sys.modules["mcp.server.fastmcp"] = fastmcp_mod
+
+
+def _load_server(server_path: str):
+    """Import server.py as a standalone module (no package needed)."""
+    _stub_optional_deps()
+    server_dir = os.path.dirname(os.path.abspath(server_path))
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    spec = importlib.util.spec_from_file_location("guardx_server",
+                                                  server_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _staged_files() -> list[str] | None:
+    """Return staged (added/copied/modified) paths, or None when this is
+    not a git repository. Deleted files are excluded by the filter, so
+    only files that exist on disk come back."""
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--cached", "--name-only",
+             "--diff-filter=ACM", "-z"],
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [p for p in proc.stdout.decode("utf-8", "replace").split("\0")
+            if p]
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    strict = os.environ.get("GUARDX_STRICT") == "1"
+    blocking = ALL_SEVERITIES if strict else BLOCKING_SEVERITIES
+
+    files = _staged_files()
+    if files is None:
+        print("guardx: not a git repository — skipping secret scan",
+              file=sys.stderr)
+        return 0
+    files = [f for f in files if os.path.isfile(f)]
+    if not files:
+        return 0
+
+    server_path = _find_server()
+    if server_path is None:
+        print(
+            "guardx: cannot find server.py — set GUARDX_HOME to your "
+            "GuardX checkout (or clone it to ~/guardx-mcp) and install "
+            "its requirements; refusing to commit blind. Remove "
+            ".git/hooks/pre-commit to disable this hook.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        server = _load_server(server_path)
+    except Exception as exc:  # noqa: BLE001 - import failure must not pass
+        print(f"guardx: failed to load {server_path}: {exc}",
+              file=sys.stderr)
+        return 1
+
+    blocked = []
+    warned = []
+    for path in files:
+        try:
+            payload = json.loads(server.scan_secrets(path, json_output=True))
+        except Exception as exc:  # noqa: BLE001 - one bad file must not pass
+            print(f"guardx: could not scan {path}: {exc}", file=sys.stderr)
+            return 1
+        if "error" in payload:
+            print(f"guardx: could not scan {path}: {payload['error']}",
+                  file=sys.stderr)
+            return 1
+        for finding in payload.get("findings", []):
+            entry = (finding["file"], finding["line"], finding["type"],
+                     finding["severity"], finding["match"])
+            if finding["severity"] in blocking:
+                blocked.append(entry)
+            else:
+                warned.append(entry)
+
+    for file, line, ftype, severity, match in warned:
+        print(f"guardx: [{severity}] {ftype} in {file}:{line} "
+              f"(match: {match}) — warning only", file=sys.stderr)
+    if blocked:
+        print("guardx: HIGH-severity secret(s) staged — commit blocked:",
+              file=sys.stderr)
+        for file, line, ftype, severity, match in blocked:
+            print(f"  [{severity}] {ftype}\n      {file}:{line}\n"
+                  f"      match: {match}", file=sys.stderr)
+        print("guardx: rotate the secret or acknowledge it in "
+              ".guardx-baseline, then stage and retry.",
+              file=sys.stderr)
+        return 1
+    if warned:
+        print(f"guardx: {len(warned)} lower-severity finding(s) staged; "
+              "commit allowed (set GUARDX_STRICT=1 to block).",
+              file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

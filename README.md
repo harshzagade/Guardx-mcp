@@ -199,6 +199,26 @@ Once connected, just ask your assistant in plain language:
 | *"Has the password `password123` been pwned?"* | `check_pwned_password` |
 | *"Check these three passwords against breaches"* | `check_pwned_passwords` |
 
+## Pre-commit hook
+
+`examples/pre-commit` runs `scan_secrets` on staged files and blocks the
+commit when a HIGH-severity secret is staged, so a key never reaches the
+remote in the first place. Install it into any repository:
+
+```bash
+cp examples/pre-commit /path/to/your-repo/.git/hooks/pre-commit
+chmod +x /path/to/your-repo/.git/hooks/pre-commit
+```
+
+The hook finds GuardX via `$GUARDX_HOME` (or `~/guardx-mcp`); it is
+stdlib-only, so no `pip install` is needed just to run it. Only staged
+files are scanned — an uncommitted scratch secret never blocks you — and
+only HIGH findings block; MED/LOW findings warn, or block too with
+`GUARDX_STRICT=1`. A `.guardx-baseline` next to a staged file still
+suppresses acknowledged findings. The hook scans the file as it sits in
+your worktree, not the exact staged blob, so re-stage after editing
+before committing.
+
 ## Sample output
 
 Real output from running the tools (secrets shown are intentionally fake):
@@ -284,6 +304,8 @@ A password not found in any breach returns `Good news: this password was NOT fou
 ```
 guardx-mcp/
 ├── server.py          # MCP server + the three tools
+├── examples/
+│   └── pre-commit     # git hook: blocks commits staging HIGH secrets
 ├── tests/             # pytest suite (stdlib-only, no extra installs)
 │   ├── test_scan_secrets.py
 │   ├── test_config_credentials.py
