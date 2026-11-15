@@ -614,6 +614,79 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
     return report
 
 
+_SARIF_LEVELS = {"HIGH": "error", "MED": "warning", "LOW": "note"}
+
+
+def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
+                  suppressed=0, since=None, history=None, skipped_large=0):
+    """Build the SARIF 2.1.0 report dict for a `scan_secrets` run.
+
+    One rule per distinct finding type (first-seen order), one result
+    per finding: HIGH maps to `error`, MED to `warning`, LOW to `note`
+    — the same banding the Xploit SARIF output uses. Previews are
+    masked with the same `_mask()` as the text report, locations use
+    paths relative to the scan root, and history findings carry their
+    commit short-SHA in `properties`. Run-level counts (files scanned,
+    unique secrets, suppressed, skipped large files) ride along in
+    `properties` so a CI consumer sees coverage, not just findings.
+    """
+    rules = []
+    seen_types = {}
+    for f in findings:
+        if f["type"] not in seen_types:
+            seen_types[f["type"]] = f["severity"]
+    for ftype, severity in seen_types.items():
+        rules.append({
+            "id": ftype,
+            "shortDescription": {"text": ftype},
+            "defaultConfiguration": {"level": _SARIF_LEVELS[severity]},
+        })
+    results = []
+    for f in findings:
+        result = {
+            "ruleId": f["type"],
+            "level": _SARIF_LEVELS[f["severity"]],
+            "message": {"text": f"{f['type']}: {_mask(f['secret'])}"},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {
+                        "uri": os.path.relpath(f["file"], scan_root),
+                    },
+                    "region": {"startLine": f["line"]},
+                },
+            }],
+        }
+        if "commit" in f:
+            result["properties"] = {"commit": f["commit"]}
+        results.append(result)
+    run = {
+        "tool": {
+            "driver": {
+                "name": "GuardX",
+                "informationUri": "https://github.com/harshzagade/Guardx-mcp",
+                "rules": rules,
+            },
+        },
+        "results": results,
+        "properties": {
+            "filesScanned": scanned,
+            "findingsCount": len(findings),
+            "uniqueSecrets": unique,
+            "suppressedCount": suppressed,
+            "skippedLargeFiles": skipped_large,
+        },
+    }
+    if since is not None:
+        run["properties"]["since"] = since
+    if history is not None:
+        run["properties"]["history"] = history
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [run],
+    }
+
+
 def _parse_since_timestamp(value: str) -> float | None:
     """Parse a `since` value as a timestamp, or return None.
 
@@ -808,6 +881,7 @@ def scan_secrets(
     max_findings: int = 200,
     exclude: str | None = None,
     json_output: bool = False,
+    sarif_output: bool = False,
     baseline: str | None = None,
     since: str | None = None,
     history: bool = False,
@@ -827,6 +901,12 @@ def scan_secrets(
             {file, line, type, severity, match} — previews are masked
             exactly like the text report. Errors are returned as
             {"error": ...} objects instead of plain "Error: ..." strings.
+        sarif_output: Return the report as SARIF 2.1.0 JSON instead of
+            human-readable text (for GitHub code scanning and other
+            SARIF consumers). One rule per finding type, one result per
+            finding with file, line, masked match and severity
+            (HIGH→error, MED→warning, LOW→note); run properties carry
+            the scan counts. Cannot be combined with `json_output`.
         baseline: Optional path to a baseline file. When omitted, a
             `.guardx-baseline` file at the scan root (or next to a
             single scanned file) is auto-discovered and applied. Each
@@ -906,6 +986,11 @@ def scan_secrets(
             return json.dumps({"tool": "scan_secrets", "path": path,
                                "error": error})
         return f"Error: {error}"
+
+    if json_output and sarif_output:
+        return json.dumps({"tool": "scan_secrets", "path": path,
+                           "error": "json_output and sarif_output cannot be "
+                                    "combined: pick one report format"})
 
     exclude_patterns = _parse_exclude(exclude)
 
@@ -1167,12 +1252,22 @@ def scan_secrets(
             for rec in _unique_secret_files(findings)
         )
     if not findings:
+        if sarif_output:
+            return json.dumps(_report_sarif(path, scan_root, scanned, findings,
+                                            unique, sev_counts, suppressed,
+                                            since, history_info,
+                                            skipped_large=skipped_large), indent=2)
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
                                            unique, sev_counts, suppressed,
                                            since, history_info,
                                            skipped_large=skipped_large))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
+    if sarif_output:
+        return json.dumps(_report_sarif(path, scan_root, scanned, findings,
+                                        unique, sev_counts, suppressed,
+                                        since, history_info,
+                                        skipped_large=skipped_large), indent=2)
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
                                        unique, sev_counts, suppressed,

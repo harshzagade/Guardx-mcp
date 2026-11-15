@@ -15,6 +15,15 @@ actual git history — no invented features.
   skipped and counted, multiple oversized files, no skipped line when
   none are large, JSON count, exactly-at-limit file still scanned,
   single oversized file scan).
+- `scan_secrets`: SARIF 2.1.0 output mode (`sarif_output=True`) — one
+  rule per finding type, one result per finding with file, line, masked
+  match and severity (HIGH→error, MED→warning, LOW→note), locations
+  relative to the scan root, history findings carry their commit
+  short-SHA, and run properties carry the scan counts; cannot be
+  combined with `json_output`.
+- `tests/test_sarif_output.py`: 6 unit tests (shape/levels/locations,
+  one rule per type, clean empty SARIF, json+sarif conflict, skipped
+  large files in run properties, history commit in result properties).
 - `scan_secrets`: "Unique secrets by file" listing — the header now maps
   each distinct secret value (masked preview) to the files it appears in
   with its finding count, most-copied secret first, so a key committed in
