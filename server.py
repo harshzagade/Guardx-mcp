@@ -574,18 +574,21 @@ def _unique_secret_files(findings) -> list:
 
 
 def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
-                 since=None, history=None):
+                 since=None, history=None, skipped_large=0):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
     report, so the JSON is safe to store in CI logs. History-scan
     findings carry their commit short-SHA, and a history run adds a
     `history` object with the commit count and truncation flag.
+    Files skipped for exceeding `MAX_FILE_BYTES` are counted as
+    `skipped_large_files` (0 when none were skipped).
     """
     report = {
         "tool": "scan_secrets",
         "path": path,
         "files_scanned": scanned,
+        "skipped_large_files": skipped_large,
         "findings_count": len(findings),
         "unique_secrets": unique,
         "severity_counts": dict(sev_counts),
@@ -862,7 +865,11 @@ def scan_secrets(
         The header carries per-severity counts plus a "Unique secrets"
         count — the number of distinct secret values across the whole
         scan, so a key committed in twelve files shows as one unique
-        secret rather than twelve independent findings. When findings
+        secret rather than twelve independent findings. Files over
+        1 MB (`MAX_FILE_BYTES`) are skipped unread, and the header
+        reports how many were skipped (mirrored as
+        `skipped_large_files` in JSON output) so a huge vendored file
+        is never mistaken for scanned. When findings
         exist, the header also lists per-file finding counts
         ("Per-file findings"), most-affected file first, so triage can
         start where the findings cluster without counting the detail
@@ -988,6 +995,7 @@ def scan_secrets(
     sev_counts = {"HIGH": 0, "MED": 0, "LOW": 0}
     suppressed = 0
     scanned = 0
+    skipped_large = 0
     history_info = None
 
     def _record(hit, fp, lineno, commit=None):
@@ -1080,6 +1088,7 @@ def scan_secrets(
         for fp in files:
             try:
                 if os.path.getsize(fp) > MAX_FILE_BYTES:
+                    skipped_large += 1
                     continue
                 with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
                     lines = fh.readlines()
@@ -1125,8 +1134,9 @@ def scan_secrets(
     header = (
         f"Secret scan of {path}"
         + (" (git history)" if history else "")
-        + f"\nFiles scanned: {scanned}\n"
-        f"Findings: {len(findings)} ({sev_summary})\n"
+        + f"\nFiles scanned: {scanned}"
+        + (f"\nSkipped (over 1 MB): {skipped_large}" if skipped_large else "")
+        + f"\nFindings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
     )
     if history_info is not None:
@@ -1160,12 +1170,14 @@ def scan_secrets(
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
                                            unique, sev_counts, suppressed,
-                                           since, history_info))
+                                           since, history_info,
+                                           skipped_large=skipped_large))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
                                        unique, sev_counts, suppressed,
-                                       since, history_info), indent=2)
+                                       since, history_info,
+                                       skipped_large=skipped_large), indent=2)
 
     def _render_finding(f):
         loc = f"{f['file']}:{f['line']}"

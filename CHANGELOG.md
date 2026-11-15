@@ -6,6 +6,15 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: skipped-large-files count — files over 1 MB are skipped
+  unread (as before), but the header now reports how many were skipped
+  (`Skipped (over 1 MB): N`, only when nonzero) and JSON output carries
+  `skipped_large_files`, so a huge vendored file is never mistaken for
+  scanned; a file exactly at the 1 MB limit is still scanned.
+- `tests/test_skipped_large_files.py`: 6 unit tests (oversized file
+  skipped and counted, multiple oversized files, no skipped line when
+  none are large, JSON count, exactly-at-limit file still scanned,
+  single oversized file scan).
 - `scan_secrets`: "Unique secrets by file" listing — the header now maps
   each distinct secret value (masked preview) to the files it appears in
   with its finding count, most-copied secret first, so a key committed in
