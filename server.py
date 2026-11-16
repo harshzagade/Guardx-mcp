@@ -288,7 +288,7 @@ def _shannon_entropy(text: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
-def _entropy_hit(line: str):
+def _entropy_hit(line: str, threshold: float = ENTROPY_THRESHOLD):
     """Return ("High-Entropy String", "LOW", candidate) for the first
     quoted string in `line` that is long and high-entropy, or None.
 
@@ -300,7 +300,7 @@ def _entropy_hit(line: str):
     for m in _QUOTED_TOKEN_RE.finditer(line):
         candidate = m.group(1)
         if len(candidate) >= ENTROPY_MIN_LENGTH and (
-            _shannon_entropy(candidate) >= ENTROPY_THRESHOLD
+            _shannon_entropy(candidate) >= threshold
         ):
             return "High-Entropy String", "LOW", candidate
     return None
@@ -533,6 +533,189 @@ def _load_baseline(baseline_path: str) -> set:
     return hashes
 
 
+CONFIG_FILENAME = ".guardx.toml"
+
+
+def _strip_config_comment(line: str) -> str:
+    """Strip a trailing `#` comment outside quotes from one config line."""
+    in_single = in_double = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_double:
+            escaped = True
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "#" and not in_single and not in_double:
+            return line[:i]
+    return line
+
+
+_CONFIG_NUMBER_RE = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$")
+
+
+def _parse_config_value(raw: str):
+    """Parse one TOML scalar (or single-line string array) from the
+    `.guardx.toml` subset; returns (value, error). Strings use JSON
+    decoding for double-quoted values (TOML basic-string escapes are a
+    subset of JSON's), single-quoted literals are taken verbatim."""
+    raw = raw.strip()
+    if not raw:
+        return None, "empty value"
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return [], None
+        items = []
+        for part in inner.split(","):
+            value, error = _parse_config_value(part)
+            if error is not None:
+                return None, error
+            if not isinstance(value, str):
+                return None, "array items must be strings"
+            items.append(value)
+        return items, None
+    if raw in ("true", "false"):
+        return raw == "true", None
+    if raw.startswith('"'):
+        try:
+            return json.loads(raw), None
+        except json.JSONDecodeError:
+            return None, f"invalid string: {raw}"
+    if raw.startswith("'"):
+        m = re.fullmatch(r"'([^']*)'", raw)
+        if m:
+            return m.group(1), None
+        return None, f"invalid string: {raw}"
+    if _CONFIG_NUMBER_RE.match(raw):
+        try:
+            return (
+                float(raw) if any(c in raw for c in ".eE") else int(raw)
+            ), None
+        except ValueError:
+            return None, f"invalid number: {raw}"
+    return None, f"unsupported value: {raw}"
+
+
+def _parse_config_text(text: str):
+    """Parse the `.guardx.toml` subset into {section: {key: value}}.
+
+    Only `[scan_secrets]` is honoured; other sections parse but are
+    ignored, so a config written for a newer GuardX still loads. A
+    malformed line is an error — a silently half-read config is worse
+    than a loud one in CI. Returns (sections, error)."""
+    sections = {}
+    current = None
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = _strip_config_comment(raw_line).strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1].strip()
+            if not name or any(c in name for c in ". "):
+                return None, (
+                    f"line {lineno}: invalid section header: "
+                    f"{raw_line.strip()}"
+                )
+            current = sections.setdefault(name, {})
+            continue
+        if current is None:
+            return None, (
+                f"line {lineno}: key outside any section: {raw_line.strip()}"
+            )
+        m = re.match(r"^([A-Za-z0-9_-]+)\s*=\s*(.+)$", line)
+        if not m:
+            return None, f"line {lineno}: cannot parse: {raw_line.strip()}"
+        value, error = _parse_config_value(m.group(2))
+        if error is not None:
+            return None, f"line {lineno}: {error}"
+        current[m.group(1)] = value
+    return sections, None
+
+
+def _load_scan_config(scan_root: str, config_arg: str | None):
+    """Resolve the `.guardx.toml` for a scan.
+
+    An explicit `config=` path wins; otherwise a `.guardx.toml` at the
+    scan root is auto-discovered (a missing file simply means no
+    config). Returns (settings, error): settings carries the config
+    file path (or None), the effective `exclude` patterns, the
+    `entropy_threshold`, and the `baseline` path (resolved relative to
+    the config file's directory). Unknown keys are ignored so a config
+    written for a newer GuardX still loads."""
+    config_path = None
+    if config_arg is not None:
+        if not os.path.isfile(config_arg):
+            return None, f"config does not exist: {config_arg}"
+        config_path = os.path.abspath(config_arg)
+    else:
+        candidate = os.path.join(scan_root, CONFIG_FILENAME)
+        if os.path.isfile(candidate):
+            config_path = candidate
+    settings = {
+        "path": config_path,
+        "exclude": [],
+        "entropy_threshold": ENTROPY_THRESHOLD,
+        "baseline": None,
+    }
+    if config_path is None:
+        return settings, None
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return None, f"cannot read config {config_path}: {exc}"
+    sections, error = _parse_config_text(text)
+    if error is not None:
+        return None, (
+            f"invalid config {os.path.basename(config_path)}: {error}"
+        )
+    section = sections.get("scan_secrets", {})
+    if "exclude" in section:
+        raw = section["exclude"]
+        if isinstance(raw, str):
+            settings["exclude"] = _parse_exclude(raw)
+        elif isinstance(raw, list) and all(
+            isinstance(item, str) for item in raw
+        ):
+            settings["exclude"] = [p.strip() for p in raw if p.strip()]
+        else:
+            return None, (
+                f"invalid config {os.path.basename(config_path)}: "
+                "exclude must be a string or a list of strings"
+            )
+    if "entropy_threshold" in section:
+        raw = section["entropy_threshold"]
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not 0 < raw <= 8
+        ):
+            return None, (
+                f"invalid config {os.path.basename(config_path)}: "
+                "entropy_threshold must be a number between 0 and 8"
+            )
+        settings["entropy_threshold"] = float(raw)
+    if "baseline" in section:
+        raw = section["baseline"]
+        if not isinstance(raw, str) or not raw.strip():
+            return None, (
+                f"invalid config {os.path.basename(config_path)}: "
+                "baseline must be a file path"
+            )
+        settings["baseline"] = (
+            raw
+            if os.path.isabs(raw)
+            else os.path.join(os.path.dirname(config_path), raw)
+        )
+    return settings, None
+
+
 def _per_file_counts(findings) -> dict:
     """Return {file: finding count} for a findings list, sorted by count
     descending (most-affected file first) with filename as tie-break, so
@@ -574,7 +757,7 @@ def _unique_secret_files(findings) -> list:
 
 
 def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
-                 since=None, history=None, skipped_large=0):
+                 since=None, history=None, skipped_large=0, config=None):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
@@ -611,6 +794,13 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
         report["since"] = since
     if history is not None:
         report["history"] = history
+    if config is not None:
+        report["config"] = {
+            "path": config["path"],
+            "exclude": config["exclude"],
+            "entropy_threshold": config["entropy_threshold"],
+            "baseline": config["baseline"],
+        }
     return report
 
 
@@ -618,7 +808,8 @@ _SARIF_LEVELS = {"HIGH": "error", "MED": "warning", "LOW": "note"}
 
 
 def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
-                  suppressed=0, since=None, history=None, skipped_large=0):
+                  suppressed=0, since=None, history=None, skipped_large=0,
+                  config=None):
     """Build the SARIF 2.1.0 report dict for a `scan_secrets` run.
 
     One rule per distinct finding type (first-seen order), one result
@@ -680,6 +871,10 @@ def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
         run["properties"]["since"] = since
     if history is not None:
         run["properties"]["history"] = history
+    if config is not None:
+        run["properties"]["config"] = os.path.relpath(
+            config["path"], scan_root
+        )
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -885,6 +1080,7 @@ def scan_secrets(
     baseline: str | None = None,
     since: str | None = None,
     history: bool = False,
+    config: str | None = None,
 ) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
@@ -938,6 +1134,16 @@ def scan_secrets(
             for — but `exclude` patterns still skip files, and the
             baseline still suppresses acknowledged findings. Rejects
             `since=` (the two modes select different inputs).
+        config: Optional path to a `.guardx.toml` config file. When
+            omitted, a `.guardx.toml` at the scan root is auto-discovered
+            (a missing file simply means no config). The `[scan_secrets]`
+            section holds repo-level defaults — `exclude` (a
+            comma-separated string or a list of strings),
+            `entropy_threshold` (a number between 0 and 8), and `baseline`
+            (a path, resolved relative to the config file's directory) —
+            so CI runs stop repeating the same flags. Explicit `exclude=` /
+            `baseline=` arguments always win over the config. A malformed
+            config is an error; unknown keys and sections are ignored.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -992,20 +1198,40 @@ def scan_secrets(
                            "error": "json_output and sarif_output cannot be "
                                     "combined: pick one report format"})
 
-    exclude_patterns = _parse_exclude(exclude)
+    # scan_root anchors relative paths (findings, baseline, config) for
+    # every mode: a single file's own directory, otherwise the path.
+    scan_root = (
+        os.path.dirname(os.path.abspath(path))
+        if os.path.isfile(path)
+        else os.path.abspath(path)
+    )
+
+    config_settings, config_error = _load_scan_config(scan_root, config)
+    if config_error is not None:
+        if json_output:
+            return json.dumps({"tool": "scan_secrets", "path": path,
+                               "error": config_error})
+        return f"Error: {config_error}"
+    # Explicit arguments always win over the config file.
+    exclude_patterns = (
+        _parse_exclude(exclude) if exclude is not None
+        else config_settings["exclude"]
+    )
+    entropy_threshold = config_settings["entropy_threshold"]
+    effective_baseline = (
+        baseline if baseline is not None else config_settings["baseline"]
+    )
+    config_report = (
+        config_settings if config_settings["path"] is not None else None
+    )
 
     files = []
     if history:
         # No working-tree file collection: the history branch streams
-        # `git log -p` instead. scan_root still anchors relative paths.
-        scan_root = (
-            os.path.dirname(os.path.abspath(path))
-            if os.path.isfile(path)
-            else os.path.abspath(path)
-        )
+        # `git log -p` instead.
+        pass
     elif os.path.isfile(path):
         # A single file still honours a .gitignore at its own directory.
-        scan_root = os.path.dirname(os.path.abspath(path))
         patterns = _load_gitignore(scan_root)
         base = os.path.basename(path)
         if not _gitignore_ignored(patterns, base, False) and not _excluded(
@@ -1013,7 +1239,6 @@ def scan_secrets(
         ):
             files = [path]
     else:
-        scan_root = os.path.abspath(path)
         patterns = _load_gitignore(scan_root)
         for root, dirs, names in os.walk(path):
             dirs[:] = [
@@ -1034,7 +1259,7 @@ def scan_secrets(
                 if os.path.splitext(n)[1].lower() in SKIP_EXTS:
                     continue
                 rel = os.path.relpath(os.path.join(root, n), scan_root)
-                if rel == BASELINE_FILENAME:
+                if rel in (BASELINE_FILENAME, CONFIG_FILENAME):
                     continue
                 if _gitignore_ignored(patterns, rel, False):
                     continue
@@ -1065,13 +1290,13 @@ def scan_secrets(
                     continue
             files = kept
 
-    if baseline is not None:
-        if not os.path.isfile(baseline):
+    if effective_baseline is not None:
+        if not os.path.isfile(effective_baseline):
             if json_output:
                 return json.dumps({"tool": "scan_secrets", "path": path,
-                                   "error": f"baseline does not exist: {baseline}"})
-            return f"Error: baseline does not exist: {baseline}"
-        baseline_hashes = _load_baseline(baseline)
+                                   "error": f"baseline does not exist: {effective_baseline}"})
+            return f"Error: baseline does not exist: {effective_baseline}"
+        baseline_hashes = _load_baseline(effective_baseline)
     else:
         auto = os.path.join(scan_root, BASELINE_FILENAME)
         baseline_hashes = _load_baseline(auto) if os.path.isfile(auto) else set()
@@ -1151,7 +1376,7 @@ def scan_secrets(
             iac_hit = _iac_credential_hit(content, fp, hist_state["resource"])
             hit = (iac_hit or _match_line(content)
                    or _config_credential_hit(content, fp)
-                   or _entropy_hit(content))
+                   or _entropy_hit(content, entropy_threshold))
             if hit:
                 _record(hit, fp, lineno, commit)
             return len(findings) < max_findings
@@ -1202,7 +1427,7 @@ def scan_secrets(
                 iac_hit = _iac_credential_hit(line, fp, iac_resource)
                 hit = (iac_hit or _match_line(line)
                        or _config_credential_hit(line, fp)
-                       or _entropy_hit(line))
+                       or _entropy_hit(line, entropy_threshold))
                 if hit:
                     _record(hit, fp, lineno)
                 if len(findings) >= max_findings:
@@ -1235,6 +1460,10 @@ def scan_secrets(
         header += history_line
     if since is not None:
         header += f"\nIncremental scan: only files changed since {since}"
+    if config_report is not None:
+        header += (
+            f"\nConfig: {os.path.relpath(config_report['path'], scan_root)}"
+        )
     if suppressed:
         header += (
             f"\nSuppressed: {suppressed} acknowledged finding(s) "
@@ -1256,23 +1485,27 @@ def scan_secrets(
             return json.dumps(_report_sarif(path, scan_root, scanned, findings,
                                             unique, sev_counts, suppressed,
                                             since, history_info,
-                                            skipped_large=skipped_large), indent=2)
+                                            skipped_large=skipped_large,
+                                            config=config_report), indent=2)
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
                                            unique, sev_counts, suppressed,
                                            since, history_info,
-                                           skipped_large=skipped_large))
+                                           skipped_large=skipped_large,
+                                           config=config_report))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if sarif_output:
         return json.dumps(_report_sarif(path, scan_root, scanned, findings,
                                         unique, sev_counts, suppressed,
                                         since, history_info,
-                                        skipped_large=skipped_large), indent=2)
+                                        skipped_large=skipped_large,
+                                        config=config_report), indent=2)
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
                                        unique, sev_counts, suppressed,
                                        since, history_info,
-                                       skipped_large=skipped_large), indent=2)
+                                       skipped_large=skipped_large,
+                                       config=config_report), indent=2)
 
     def _render_finding(f):
         loc = f"{f['file']}:{f['line']}"

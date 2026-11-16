@@ -6,6 +6,23 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: `.guardx.toml` config file — a `[scan_secrets]` section
+  at the scan root (or an explicit `config=` path) holds repo-level
+  defaults for `exclude` (comma-separated string or list of strings),
+  `entropy_threshold` (a number between 0 and 8, default 4.0) and
+  `baseline` (a path resolved relative to the config file's directory),
+  so CI runs stop repeating the same flags; explicit `exclude=` /
+  `baseline=` arguments always win, a malformed config is an error, and
+  unknown keys/sections are ignored. The config file itself is never
+  scanned; the text header notes `Config: .guardx.toml` when one is
+  loaded, JSON output carries a `config` object with the effective
+  settings, and SARIF run properties carry the config path.
+- `tests/test_config_file.py`: 17 unit tests (string/list excludes,
+  explicit-arg precedence, config baseline + missing baseline error,
+  entropy threshold raised/lowered/invalid, malformed config, missing
+  explicit config path, explicit config path with config-relative
+  baseline, config file not scanned, unknown keys ignored, JSON config
+  shape, no-config case, single-file config discovery).
 - `scan_secrets`: skipped-large-files count — files over 1 MB are skipped
   unread (as before), but the header now reports how many were skipped
   (`Skipped (over 1 MB): N`, only when nonzero) and JSON output carries
