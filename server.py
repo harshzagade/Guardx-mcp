@@ -15,6 +15,8 @@ Tools:
   4. check_pwned_passwords(pws)  - batch version of (3): one summary line
                                    per password, one range request per
                                    distinct hash prefix
+  5. generate_baseline(path)     - emit the finding hashes for the current
+                                   scan, ready to write to .guardx-baseline
 Prompt:
   audit_this_codebase_prompt     - "audit this codebase" template chaining
                                    scan_secrets + audit_dependencies into a
@@ -1070,6 +1072,220 @@ def _scan_history(repo_root: str, pathspec: str, max_commits: int, on_diff_line)
     return commits, files_seen, truncated, None
 
 
+def _collect_secret_findings(path, scan_root, max_findings,
+                             exclude_patterns, baseline_hashes, since,
+                             history, entropy_threshold):
+    """Run the secret-scan collection phase shared by `scan_secrets`
+    and `generate_baseline`: file collection (working tree or git
+    history), incremental-scan filtering, and the per-line matching
+    loop.
+
+    Returns (data, error): data carries the findings list plus the
+    scan counters (scanned, skipped_large, suppressed, sev_counts,
+    history_info); error is a plain message string, or None.
+    Findings carry a `rel` field (path relative to the scan root)
+    so callers can recompute the baseline hash exactly as `_record`
+    did."""
+    files = []
+    if history:
+        # No working-tree file collection: the history branch streams
+        # `git log -p` instead.
+        pass
+    elif os.path.isfile(path):
+        # A single file still honours a .gitignore at its own directory.
+        patterns = _load_gitignore(scan_root)
+        base = os.path.basename(path)
+        if not _gitignore_ignored(patterns, base, False) and not _excluded(
+            exclude_patterns, base
+        ):
+            files = [path]
+    else:
+        patterns = _load_gitignore(scan_root)
+        for root, dirs, names in os.walk(path):
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in IGNORE_DIRS
+                and not _gitignore_ignored(
+                    patterns,
+                    os.path.relpath(os.path.join(root, d), scan_root),
+                    True,
+                )
+                and not _excluded(
+                    exclude_patterns,
+                    os.path.relpath(os.path.join(root, d), scan_root),
+                )
+            ]
+            for n in names:
+                if os.path.splitext(n)[1].lower() in SKIP_EXTS:
+                    continue
+                rel = os.path.relpath(os.path.join(root, n), scan_root)
+                if rel in (BASELINE_FILENAME, CONFIG_FILENAME):
+                    continue
+                if _gitignore_ignored(patterns, rel, False):
+                    continue
+                if _excluded(exclude_patterns, rel):
+                    continue
+                files.append(os.path.join(root, n))
+
+    if since is not None:
+        mode, value, since_error = _resolve_since(scan_root, since)
+        if since_error is not None:
+            return None, since_error
+        if mode == "git":
+            repo_root, changed = value
+            files = [
+                fp for fp in files
+                if os.path.relpath(fp, repo_root) in changed
+            ]
+        else:
+            kept = []
+            for fp in files:
+                try:
+                    if os.path.getmtime(fp) > value:
+                        kept.append(fp)
+                except OSError:
+                    continue
+            files = kept
+
+    findings = []
+    sev_counts = {"HIGH": 0, "MED": 0, "LOW": 0}
+    suppressed = 0
+    scanned = 0
+    skipped_large = 0
+    history_info = None
+
+    def _record(hit, fp, lineno, commit=None):
+        """Append one matched line as a finding (baseline-suppressed
+        findings only bump the counter). Shared by the working-tree
+        loop and the history branch so both apply the same
+        suppression, severity counts, and finding shape; history
+        findings additionally carry their commit short-SHA."""
+        nonlocal suppressed
+        name, severity, secret = hit
+        rel = os.path.relpath(fp, scan_root)
+        if _finding_hash(rel, name, secret) in baseline_hashes:
+            suppressed += 1
+            return
+        sev_counts[severity] += 1
+        finding = {
+            "file": fp,
+            "line": lineno,
+            "type": name,
+            "severity": severity,
+            "secret": secret,
+            "rel": rel,
+        }
+        if commit is not None:
+            finding["commit"] = commit
+        findings.append(finding)
+
+    if history:
+        repo_root = _git_repo_root(scan_root)
+        if repo_root is None:
+            return None, "history scan needs a git repository"
+        pathspec = os.path.relpath(os.path.abspath(path), repo_root)
+        # IaC block context for the current diff: reset whenever the
+        # commit or the file changes, since one commit's hunk window
+        # says nothing about the next commit's block context.
+        hist_state = {"commit": None, "file": None, "resource": None, "depth": 0}
+
+        def _on_diff_line(commit, rel_file, lineno, content, is_added):
+            if _excluded(exclude_patterns, rel_file):
+                return True
+            if os.path.splitext(rel_file)[1].lower() in SKIP_EXTS:
+                return True
+            if hist_state["commit"] != commit or hist_state["file"] != rel_file:
+                hist_state["commit"] = commit
+                hist_state["file"] = rel_file
+                hist_state["resource"] = (
+                    "tfvars"
+                    if os.path.splitext(rel_file)[1].lower() == ".tfvars"
+                    else None
+                )
+                hist_state["depth"] = 0
+            fp = os.path.join(repo_root, rel_file)
+            if _is_iac_file(fp):
+                declared = _iac_resource_type(content)
+                if declared is not None:
+                    hist_state["resource"] = declared
+                    hist_state["depth"] = content.count("{") - content.count("}")
+                elif hist_state["resource"] is not None and hist_state["depth"] > 0:
+                    hist_state["depth"] += content.count("{") - content.count("}")
+                    if hist_state["depth"] <= 0:
+                        hist_state["resource"] = None
+                        hist_state["depth"] = 0
+            if not is_added:
+                return True
+            iac_hit = _iac_credential_hit(content, fp, hist_state["resource"])
+            hit = (iac_hit or _match_line(content)
+                   or _config_credential_hit(content, fp)
+                   or _entropy_hit(content, entropy_threshold))
+            if hit:
+                _record(hit, fp, lineno, commit)
+            return len(findings) < max_findings
+
+        commits_scanned, files_seen, truncated, history_error = _scan_history(
+            repo_root, pathspec, MAX_HISTORY_COMMITS, _on_diff_line
+        )
+        if history_error is not None:
+            return None, history_error
+        scanned = len(files_seen)
+        history_info = {
+            "commits_scanned": commits_scanned,
+            "truncated": truncated,
+        }
+    else:
+        for fp in files:
+            try:
+                if os.path.getsize(fp) > MAX_FILE_BYTES:
+                    skipped_large += 1
+                    continue
+                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.readlines()
+            except (OSError, UnicodeError):
+                continue
+            scanned += 1
+
+            # IaC block context for this file: the resource type currently
+            # open (Terraform: brace-tracked; CFN/ARM: until the next Type;
+            # .tfvars: the whole file, since it holds deployment values).
+            iac_resource = None
+            iac_depth = 0
+            if os.path.splitext(fp)[1].lower() == ".tfvars":
+                iac_resource = "tfvars"
+            for lineno, line in enumerate(lines, start=1):
+                if _is_iac_file(fp):
+                    declared = _iac_resource_type(line)
+                    if declared is not None:
+                        iac_resource = declared
+                        iac_depth = line.count("{") - line.count("}")
+                    elif iac_resource is not None and iac_depth > 0:
+                        iac_depth += line.count("{") - line.count("}")
+                        if iac_depth <= 0:
+                            iac_resource = None
+                            iac_depth = 0
+                iac_hit = _iac_credential_hit(line, fp, iac_resource)
+                hit = (iac_hit or _match_line(line)
+                       or _config_credential_hit(line, fp)
+                       or _entropy_hit(line, entropy_threshold))
+                if hit:
+                    _record(hit, fp, lineno)
+                if len(findings) >= max_findings:
+                    break
+            if len(findings) >= max_findings:
+                break
+
+    return {
+        "findings": findings,
+        "scanned": scanned,
+        "skipped_large": skipped_large,
+        "suppressed": suppressed,
+        "sev_counts": sev_counts,
+        "history_info": history_info,
+    }, None
+
+
 @mcp.tool()
 def scan_secrets(
     path: str,
@@ -1225,71 +1441,6 @@ def scan_secrets(
         config_settings if config_settings["path"] is not None else None
     )
 
-    files = []
-    if history:
-        # No working-tree file collection: the history branch streams
-        # `git log -p` instead.
-        pass
-    elif os.path.isfile(path):
-        # A single file still honours a .gitignore at its own directory.
-        patterns = _load_gitignore(scan_root)
-        base = os.path.basename(path)
-        if not _gitignore_ignored(patterns, base, False) and not _excluded(
-            exclude_patterns, base
-        ):
-            files = [path]
-    else:
-        patterns = _load_gitignore(scan_root)
-        for root, dirs, names in os.walk(path):
-            dirs[:] = [
-                d
-                for d in dirs
-                if d not in IGNORE_DIRS
-                and not _gitignore_ignored(
-                    patterns,
-                    os.path.relpath(os.path.join(root, d), scan_root),
-                    True,
-                )
-                and not _excluded(
-                    exclude_patterns,
-                    os.path.relpath(os.path.join(root, d), scan_root),
-                )
-            ]
-            for n in names:
-                if os.path.splitext(n)[1].lower() in SKIP_EXTS:
-                    continue
-                rel = os.path.relpath(os.path.join(root, n), scan_root)
-                if rel in (BASELINE_FILENAME, CONFIG_FILENAME):
-                    continue
-                if _gitignore_ignored(patterns, rel, False):
-                    continue
-                if _excluded(exclude_patterns, rel):
-                    continue
-                files.append(os.path.join(root, n))
-
-    if since is not None:
-        mode, value, since_error = _resolve_since(scan_root, since)
-        if since_error is not None:
-            if json_output:
-                return json.dumps({"tool": "scan_secrets", "path": path,
-                                   "error": since_error})
-            return f"Error: {since_error}"
-        if mode == "git":
-            repo_root, changed = value
-            files = [
-                fp for fp in files
-                if os.path.relpath(fp, repo_root) in changed
-            ]
-        else:
-            kept = []
-            for fp in files:
-                try:
-                    if os.path.getmtime(fp) > value:
-                        kept.append(fp)
-                except OSError:
-                    continue
-            files = kept
-
     if effective_baseline is not None:
         if not os.path.isfile(effective_baseline):
             if json_output:
@@ -1301,139 +1452,21 @@ def scan_secrets(
         auto = os.path.join(scan_root, BASELINE_FILENAME)
         baseline_hashes = _load_baseline(auto) if os.path.isfile(auto) else set()
 
-    findings = []
-    sev_counts = {"HIGH": 0, "MED": 0, "LOW": 0}
-    suppressed = 0
-    scanned = 0
-    skipped_large = 0
-    history_info = None
-
-    def _record(hit, fp, lineno, commit=None):
-        """Append one matched line as a finding (baseline-suppressed
-        findings only bump the counter). Shared by the working-tree
-        loop and the history branch so both apply the same
-        suppression, severity counts, and finding shape; history
-        findings additionally carry their commit short-SHA."""
-        nonlocal suppressed
-        name, severity, secret = hit
-        rel = os.path.relpath(fp, scan_root)
-        if _finding_hash(rel, name, secret) in baseline_hashes:
-            suppressed += 1
-            return
-        sev_counts[severity] += 1
-        finding = {
-            "file": fp,
-            "line": lineno,
-            "type": name,
-            "severity": severity,
-            "secret": secret,
-        }
-        if commit is not None:
-            finding["commit"] = commit
-        findings.append(finding)
-
-    if history:
-        repo_root = _git_repo_root(scan_root)
-        if repo_root is None:
-            error = "history scan needs a git repository"
-            if json_output:
-                return json.dumps({"tool": "scan_secrets", "path": path,
-                                   "error": error})
-            return f"Error: {error}"
-        pathspec = os.path.relpath(os.path.abspath(path), repo_root)
-        # IaC block context for the current diff: reset whenever the
-        # commit or the file changes, since one commit's hunk window
-        # says nothing about the next commit's block context.
-        hist_state = {"commit": None, "file": None, "resource": None, "depth": 0}
-
-        def _on_diff_line(commit, rel_file, lineno, content, is_added):
-            if _excluded(exclude_patterns, rel_file):
-                return True
-            if os.path.splitext(rel_file)[1].lower() in SKIP_EXTS:
-                return True
-            if hist_state["commit"] != commit or hist_state["file"] != rel_file:
-                hist_state["commit"] = commit
-                hist_state["file"] = rel_file
-                hist_state["resource"] = (
-                    "tfvars"
-                    if os.path.splitext(rel_file)[1].lower() == ".tfvars"
-                    else None
-                )
-                hist_state["depth"] = 0
-            fp = os.path.join(repo_root, rel_file)
-            if _is_iac_file(fp):
-                declared = _iac_resource_type(content)
-                if declared is not None:
-                    hist_state["resource"] = declared
-                    hist_state["depth"] = content.count("{") - content.count("}")
-                elif hist_state["resource"] is not None and hist_state["depth"] > 0:
-                    hist_state["depth"] += content.count("{") - content.count("}")
-                    if hist_state["depth"] <= 0:
-                        hist_state["resource"] = None
-                        hist_state["depth"] = 0
-            if not is_added:
-                return True
-            iac_hit = _iac_credential_hit(content, fp, hist_state["resource"])
-            hit = (iac_hit or _match_line(content)
-                   or _config_credential_hit(content, fp)
-                   or _entropy_hit(content, entropy_threshold))
-            if hit:
-                _record(hit, fp, lineno, commit)
-            return len(findings) < max_findings
-
-        commits_scanned, files_seen, truncated, history_error = _scan_history(
-            repo_root, pathspec, MAX_HISTORY_COMMITS, _on_diff_line
-        )
-        if history_error is not None:
-            if json_output:
-                return json.dumps({"tool": "scan_secrets", "path": path,
-                                   "error": history_error})
-            return f"Error: {history_error}"
-        scanned = len(files_seen)
-        history_info = {
-            "commits_scanned": commits_scanned,
-            "truncated": truncated,
-        }
-    else:
-        for fp in files:
-            try:
-                if os.path.getsize(fp) > MAX_FILE_BYTES:
-                    skipped_large += 1
-                    continue
-                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
-                    lines = fh.readlines()
-            except (OSError, UnicodeError):
-                continue
-            scanned += 1
-
-            # IaC block context for this file: the resource type currently
-            # open (Terraform: brace-tracked; CFN/ARM: until the next Type;
-            # .tfvars: the whole file, since it holds deployment values).
-            iac_resource = None
-            iac_depth = 0
-            if os.path.splitext(fp)[1].lower() == ".tfvars":
-                iac_resource = "tfvars"
-            for lineno, line in enumerate(lines, start=1):
-                if _is_iac_file(fp):
-                    declared = _iac_resource_type(line)
-                    if declared is not None:
-                        iac_resource = declared
-                        iac_depth = line.count("{") - line.count("}")
-                    elif iac_resource is not None and iac_depth > 0:
-                        iac_depth += line.count("{") - line.count("}")
-                        if iac_depth <= 0:
-                            iac_resource = None
-                            iac_depth = 0
-                iac_hit = _iac_credential_hit(line, fp, iac_resource)
-                hit = (iac_hit or _match_line(line)
-                       or _config_credential_hit(line, fp)
-                       or _entropy_hit(line, entropy_threshold))
-                if hit:
-                    _record(hit, fp, lineno)
-                if len(findings) >= max_findings:
-                    break
-            if len(findings) >= max_findings:
-                break
+    data, scan_error = _collect_secret_findings(
+        path, scan_root, max_findings, exclude_patterns, baseline_hashes,
+        since, history, entropy_threshold,
+    )
+    if scan_error is not None:
+        if json_output:
+            return json.dumps({"tool": "scan_secrets", "path": path,
+                               "error": scan_error})
+        return f"Error: {scan_error}"
+    findings = data["findings"]
+    scanned = data["scanned"]
+    skipped_large = data["skipped_large"]
+    suppressed = data["suppressed"]
+    sev_counts = data["sev_counts"]
+    history_info = data["history_info"]
 
     # Repo-wide dedup: one committed key checked into many files is still
     # one secret. Compare raw values (never the masked previews) so a
@@ -1528,6 +1561,75 @@ def scan_secrets(
             "rewritten — removing the file from HEAD is not enough."
         )
     return header + "\n\n" + rendered + note
+
+
+@mcp.tool()
+def generate_baseline(
+    path: str,
+    max_findings: int = 200,
+    exclude: str | None = None,
+    since: str | None = None,
+    history: bool = False,
+    config: str | None = None,
+) -> str:
+    """Generate the finding hashes for the current scan, ready to write
+    to a `.guardx-baseline` file.
+
+    Runs exactly the same collection phase as `scan_secrets` (same file
+    selection, `.gitignore`/`exclude` handling, history mode, and
+    entropy threshold from `.guardx.toml`), then returns one SHA-256
+    hash per line — sorted, deduplicated, one hash per distinct
+    (file, type, secret) finding — so a team can acknowledge a reviewed
+    batch without hand-computing hashes:
+
+        open(".guardx-baseline", "w").write(generate_baseline("."))
+
+    No baseline is applied while generating: an existing baseline would
+    hide the very findings the new baseline must capture, so
+    acknowledged findings are included and a regenerated baseline stays
+    complete. An empty string means the scan found nothing. The `config`
+    file's `exclude` and `entropy_threshold` still apply; its `baseline`
+    setting is ignored, for the same reason. `history` rejects `since=`,
+    exactly as `scan_secrets` does.
+    """
+    if not os.path.exists(path):
+        return f"Error: path does not exist: {path}"
+
+    if history and since is not None:
+        return (
+            "Error: history and since cannot be combined: history scans "
+            "the git log, since selects working-tree files"
+        )
+
+    # scan_root anchors relative paths for every mode: a single file's
+    # own directory, otherwise the path.
+    scan_root = (
+        os.path.dirname(os.path.abspath(path))
+        if os.path.isfile(path)
+        else os.path.abspath(path)
+    )
+
+    config_settings, config_error = _load_scan_config(scan_root, config)
+    if config_error is not None:
+        return f"Error: {config_error}"
+    exclude_patterns = (
+        _parse_exclude(exclude) if exclude is not None
+        else config_settings["exclude"]
+    )
+    entropy_threshold = config_settings["entropy_threshold"]
+
+    data, scan_error = _collect_secret_findings(
+        path, scan_root, max_findings, exclude_patterns, set(),
+        since, history, entropy_threshold,
+    )
+    if scan_error is not None:
+        return f"Error: {scan_error}"
+
+    hashes = sorted({
+        _finding_hash(f["rel"], f["type"], f["secret"])
+        for f in data["findings"]
+    })
+    return "\n".join(hashes) + ("\n" if hashes else "")
 
 
 # ---------------------------------------------------------------------------

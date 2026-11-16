@@ -23,6 +23,21 @@ actual git history — no invented features.
   explicit config path, explicit config path with config-relative
   baseline, config file not scanned, unknown keys ignored, JSON config
   shape, no-config case, single-file config discovery).
+- `generate_baseline(path)`: new tool returning the finding hashes for
+  the current scan — one SHA-256 hash per line, sorted and deduplicated,
+  ready to write to `.guardx-baseline` — so a team can acknowledge a
+  reviewed batch without hand-computing hashes. It reuses the scan
+  collection phase via a new shared `_collect_secret_findings()`
+  internal (extracted from `scan_secrets` with no behaviour change;
+  full suite still green), so generation and scanning can never drift
+  apart. No baseline is applied while generating, so a regenerated
+  baseline stays complete; the config file's `exclude` and
+  `entropy_threshold` still apply, its `baseline` setting is ignored.
+- `tests/test_generate_baseline.py`: 12 unit tests (hash values, same
+  secret collapsing in one file, same secret in two files, clean scan,
+  write-then-scan round trip, existing baseline not hiding generation,
+  exclude, config exclude + entropy threshold, history mode, missing
+  path, history+since rejection, max_findings cap).
 - `scan_secrets`: skipped-large-files count — files over 1 MB are skipped
   unread (as before), but the header now reports how many were skipped
   (`Skipped (over 1 MB): N`, only when nonzero) and JSON output carries
