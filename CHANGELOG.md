@@ -6,6 +6,21 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets(entropy_threshold=...)`: the high-entropy bar is now
+  tunable per run — a number between 0 (exclusive) and 8, default 4.0 —
+  so a noisy codebase can raise it (e.g. `4.5`) instead of disabling the
+  check outright, or lower it (e.g. `3.0`) to catch shorter, less random
+  tokens. An explicit value always wins over `.guardx.toml`; an invalid
+  value is an error naming the valid range, in text and JSON output.
+  The JSON/SARIF `config` object carries the effective threshold, and
+  `generate_baseline` accepts the same argument so a baseline generated
+  for a raised bar matches the scan that uses it.
+- `tests/test_entropy_threshold.py`: 9 unit tests (default threshold
+  unchanged, raised bar suppresses a 4.322-entropy string, lowered bar
+  catches a 3.322-entropy string, invalid values rejected in text and
+  JSON modes, boundary values 0.1/8 accepted, explicit argument beats
+  the config file, JSON `config` object reports the effective
+  threshold, `generate_baseline` honours the argument).
 - `scan_secrets`: `.guardx.toml` config file — a `[scan_secrets]` section
   at the scan root (or an explicit `config=` path) holds repo-level
   defaults for `exclude` (comma-separated string or list of strings),

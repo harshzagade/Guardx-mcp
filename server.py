@@ -1297,6 +1297,7 @@ def scan_secrets(
     since: str | None = None,
     history: bool = False,
     config: str | None = None,
+    entropy_threshold: float | None = None,
 ) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
@@ -1358,8 +1359,16 @@ def scan_secrets(
             `entropy_threshold` (a number between 0 and 8), and `baseline`
             (a path, resolved relative to the config file's directory) —
             so CI runs stop repeating the same flags. Explicit `exclude=` /
-            `baseline=` arguments always win over the config. A malformed
-            config is an error; unknown keys and sections are ignored.
+            `baseline=` / `entropy_threshold=` arguments always win over
+            the config. A malformed config is an error; unknown keys and
+            sections are ignored.
+        entropy_threshold: Optional Shannon-entropy bar for the
+            high-entropy heuristic, a number between 0 (exclusive) and 8
+            (default 4.0). Noisy codebases can raise it (e.g. `4.5`) so
+            borderline strings stop flagging, or lower it (e.g. `3.0`) to
+            catch shorter, less random tokens. An explicit value always
+            wins over the config file; an invalid value is an error
+            naming the valid range.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -1385,7 +1394,8 @@ def scan_secrets(
         Shannon entropy at least 4.0 bits/char), reported as LOW
         "High-Entropy String" findings — a catch for custom token
         formats; plain English and pure hex hashes stay below the
-        threshold. When scanning a directory, a `.gitignore` at the
+        threshold. The bar defaults to 4.0 bits/char and is tunable per
+        run with `entropy_threshold=` (or repo-wide in `.guardx.toml`). When scanning a directory, a `.gitignore` at the
         scan root is honoured (basename/dir/negation patterns); ignored
         paths are not counted as scanned. In infrastructure-as-code
         files (Terraform `.tf`, `.tfvars`, CloudFormation/ARM
@@ -1433,7 +1443,25 @@ def scan_secrets(
         _parse_exclude(exclude) if exclude is not None
         else config_settings["exclude"]
     )
-    entropy_threshold = config_settings["entropy_threshold"]
+    entropy_threshold = (
+        entropy_threshold
+        if entropy_threshold is not None
+        else config_settings["entropy_threshold"]
+    )
+    if (
+        isinstance(entropy_threshold, bool)
+        or not isinstance(entropy_threshold, (int, float))
+        or not 0 < entropy_threshold <= 8
+    ):
+        error = "entropy_threshold must be a number between 0 and 8"
+        if json_output:
+            return json.dumps({"tool": "scan_secrets", "path": path,
+                               "error": error})
+        return f"Error: {error}"
+    entropy_threshold = float(entropy_threshold)
+    # The JSON/SARIF `config` object carries the effective settings, so
+    # an explicit override is reflected there too, not just the file.
+    config_settings["entropy_threshold"] = entropy_threshold
     effective_baseline = (
         baseline if baseline is not None else config_settings["baseline"]
     )
@@ -1571,6 +1599,7 @@ def generate_baseline(
     since: str | None = None,
     history: bool = False,
     config: str | None = None,
+    entropy_threshold: float | None = None,
 ) -> str:
     """Generate the finding hashes for the current scan, ready to write
     to a `.guardx-baseline` file.
@@ -1589,8 +1618,11 @@ def generate_baseline(
     acknowledged findings are included and a regenerated baseline stays
     complete. An empty string means the scan found nothing. The `config`
     file's `exclude` and `entropy_threshold` still apply; its `baseline`
-    setting is ignored, for the same reason. `history` rejects `since=`,
-    exactly as `scan_secrets` does.
+    setting is ignored, for the same reason. An explicit
+    `entropy_threshold=` argument (a number between 0, exclusive, and 8)
+    wins over the config file, exactly as in `scan_secrets`, so a
+    baseline generated for a raised bar matches the scan that uses it.
+    `history` rejects `since=`, exactly as `scan_secrets` does.
     """
     if not os.path.exists(path):
         return f"Error: path does not exist: {path}"
@@ -1616,7 +1648,18 @@ def generate_baseline(
         _parse_exclude(exclude) if exclude is not None
         else config_settings["exclude"]
     )
-    entropy_threshold = config_settings["entropy_threshold"]
+    entropy_threshold = (
+        entropy_threshold
+        if entropy_threshold is not None
+        else config_settings["entropy_threshold"]
+    )
+    if (
+        isinstance(entropy_threshold, bool)
+        or not isinstance(entropy_threshold, (int, float))
+        or not 0 < entropy_threshold <= 8
+    ):
+        return "Error: entropy_threshold must be a number between 0 and 8"
+    entropy_threshold = float(entropy_threshold)
 
     data, scan_error = _collect_secret_findings(
         path, scan_root, max_findings, exclude_patterns, set(),
