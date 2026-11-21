@@ -6,6 +6,17 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: same-secret-same-file collapse — the same secret
+  pasted on several lines of one file is now a single finding listing
+  every line number (text `file:1, 4, 9`, JSON `lines` array, SARIF
+  `lines` property), so a key committed ten times in one file is one
+  finding to rotate, not ten. `line` stays the first line for existing
+  consumers; in history mode the collapse is per commit. `max_findings`
+  counts distinct findings, so a folded duplicate never eats the cap.
+- `tests/test_same_secret_collapse.py`: 8 unit tests (text/JSON/SARIF
+  line lists, different secrets stay separate, same secret in two files
+  stays two findings, cap counts collapsed findings once, history
+  collapse within one commit only).
 - `scan_secrets(entropy_threshold=...)`: the high-entropy bar is now
   tunable per run — a number between 0 (exclusive) and 8, default 4.0 —
   so a noisy codebase can raise it (e.g. `4.5`) instead of disabling the

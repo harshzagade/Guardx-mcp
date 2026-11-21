@@ -245,14 +245,17 @@ class TestSecretDedup:
         assert "b.py:1" in report
 
     def test_same_secret_twice_in_one_file_counts_once(self, tmp_path):
+        # Same-secret-same-file collapse: one finding listing both
+        # lines, not one finding per line.
         secret = "ghp_" + "f" * 36
         fp = _write(
             tmp_path, "a.py",
             f'TOKEN = "{secret}"\nKEY = "{secret}"\n',
         )
         report = server.scan_secrets(fp)
-        assert "Findings: 2" in report
+        assert "Findings: 1" in report
         assert "Unique secrets: 1" in report
+        assert "a.py:1, 2" in report
 
     def test_different_secrets_each_count(self, tmp_path):
         _write(

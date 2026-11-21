@@ -784,6 +784,7 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
             {
                 "file": f["file"],
                 "line": f["line"],
+                "lines": list(f["lines"]),
                 "type": f["type"],
                 "severity": f["severity"],
                 "match": _mask(f["secret"]),
@@ -851,6 +852,10 @@ def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
         }
         if "commit" in f:
             result["properties"] = {"commit": f["commit"]}
+        if len(f["lines"]) > 1:
+            # The same secret on several lines is one result; list
+            # every line so the extra occurrences are not lost.
+            result.setdefault("properties", {})["lines"] = list(f["lines"])
         results.append(result)
     run = {
         "tool": {
@@ -1160,17 +1165,39 @@ def _collect_secret_findings(path, scan_root, max_findings,
         findings only bump the counter). Shared by the working-tree
         loop and the history branch so both apply the same
         suppression, severity counts, and finding shape; history
-        findings additionally carry their commit short-SHA."""
+        findings additionally carry their commit short-SHA.
+
+        The same secret pasted on several lines of one file is one
+        finding, not one per line: a repeat (same file, type and
+        secret — and the same commit in history mode) folds its line
+        number into the existing finding's `lines` list, so a key
+        pasted ten times is one finding to rotate, listed with all
+        its line numbers. `line` stays the first line, so existing
+        consumers keep working.
+
+        Returns True when a new finding was appended, False when the
+        hit folded into an existing finding or was baseline-suppressed
+        — so callers stop at `max_findings` only when a *new* finding
+        reaches the cap, not when a duplicate line of an existing one
+        does."""
         nonlocal suppressed
         name, severity, secret = hit
         rel = os.path.relpath(fp, scan_root)
         if _finding_hash(rel, name, secret) in baseline_hashes:
             suppressed += 1
-            return
+            return False
+        for existing in findings:
+            if (existing["rel"] == rel and existing["type"] == name
+                    and existing["secret"] == secret
+                    and existing.get("commit") == commit):
+                if lineno not in existing["lines"]:
+                    existing["lines"].append(lineno)
+                return False
         sev_counts[severity] += 1
         finding = {
             "file": fp,
             "line": lineno,
+            "lines": [lineno],
             "type": name,
             "severity": severity,
             "secret": secret,
@@ -1179,6 +1206,7 @@ def _collect_secret_findings(path, scan_root, max_findings,
         if commit is not None:
             finding["commit"] = commit
         findings.append(finding)
+        return True
 
     if history:
         repo_root = _git_repo_root(scan_root)
@@ -1222,8 +1250,10 @@ def _collect_secret_findings(path, scan_root, max_findings,
                    or _config_credential_hit(content, fp)
                    or _entropy_hit(content, entropy_threshold))
             if hit:
-                _record(hit, fp, lineno, commit)
-            return len(findings) < max_findings
+                added = _record(hit, fp, lineno, commit)
+                if added and len(findings) >= max_findings:
+                    return False
+            return True
 
         commits_scanned, files_seen, truncated, history_error = _scan_history(
             repo_root, pathspec, MAX_HISTORY_COMMITS, _on_diff_line
@@ -1270,9 +1300,9 @@ def _collect_secret_findings(path, scan_root, max_findings,
                        or _config_credential_hit(line, fp)
                        or _entropy_hit(line, entropy_threshold))
                 if hit:
-                    _record(hit, fp, lineno)
-                if len(findings) >= max_findings:
-                    break
+                    added = _record(hit, fp, lineno)
+                    if added and len(findings) >= max_findings:
+                        break
             if len(findings) >= max_findings:
                 break
 
@@ -1311,7 +1341,7 @@ def scan_secrets(
             human-readable text (for CI pipelines). The JSON object carries
             the path, files scanned, finding count, unique-secrets count,
             per-severity counts, per-file finding counts, and a findings array of
-            {file, line, type, severity, match} — previews are masked
+            {file, line, lines, type, severity, match} — previews are masked
             exactly like the text report. Errors are returned as
             {"error": ...} objects instead of plain "Error: ..." strings.
         sarif_output: Return the report as SARIF 2.1.0 JSON instead of
@@ -1372,7 +1402,12 @@ def scan_secrets(
 
     Returns:
         A report of likely secrets with file, line number, type, and a
-        masked preview. Values are masked so the report is safe to share.
+        masked preview. The same secret pasted on several lines of one
+        file is a single finding listing every line number (in text as
+        `file:1, 4, 9`, in JSON as a `lines` array, in SARIF as a
+        `lines` property), so a key committed ten times in one file is
+        one finding to rotate, not ten. Values are masked so the report
+        is safe to share.
         The header carries per-severity counts plus a "Unique secrets"
         count — the number of distinct secret values across the whole
         scan, so a key committed in twelve files shows as one unique
@@ -1569,7 +1604,8 @@ def scan_secrets(
                                        config=config_report), indent=2)
 
     def _render_finding(f):
-        loc = f"{f['file']}:{f['line']}"
+        lines = ", ".join(str(n) for n in f["lines"])
+        loc = f"{f['file']}:{lines}"
         if "commit" in f:
             loc += f" (commit {f['commit']})"
         return (

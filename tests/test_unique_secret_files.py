@@ -129,7 +129,8 @@ class TestUniqueSecretFiles:
         lines = [ln.strip() for ln in block.strip().splitlines()]
         assert len(lines) == 1
         assert lines[0].count(fp) == 1
-        assert "(2 findings)" in lines[0]
+        # The two occurrences collapsed into one finding.
+        assert "(1 finding)" in lines[0]
 
     def test_identical_masks_still_list_separately(self, tmp_path):
         # Two secrets sharing first 4 / last 2 chars (and length) mask
