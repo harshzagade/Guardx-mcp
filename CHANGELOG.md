@@ -17,6 +17,18 @@ actual git history — no invented features.
   line lists, different secrets stay separate, same secret in two files
   stays two findings, cap counts collapsed findings once, history
   collapse within one commit only).
+- `scan_secrets`: `.npmrc` / `.pypirc` join the config-credential
+  heuristic — a `.pypirc` `password = ...` line and an `.npmrc`
+  `//registry.npmjs.org/:_authToken=...` line (including scoped
+  registries, `//host/@scope/:_authToken=...`, and bare `_authToken=...`)
+  are MED "Config Credential" findings, so live registry credentials
+  are caught the same way `.env` passwords are. `${NPM_TOKEN}`
+  placeholders and plain `registry=` lines stay clean; the key/value
+  verdict is now shared by the generic and npmrc forms.
+- `tests/test_config_credentials.py`: 9 new tests for the registry
+  credential files (scoped `_authToken`/`password`, scoped-registry
+  path, bare `_authToken`, placeholder skip, `registry=` clean,
+  `.pypirc` password/username, JSON masking).
 - `scan_secrets(entropy_threshold=...)`: the high-entropy bar is now
   tunable per run — a number between 0 (exclusive) and 8, default 4.0 —
   so a noisy codebase can raise it (e.g. `4.5`) instead of disabling the

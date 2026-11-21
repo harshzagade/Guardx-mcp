@@ -312,15 +312,18 @@ def _entropy_hit(line: str, threshold: float = ENTROPY_THRESHOLD):
 # key with a real-looking value is worth a MED finding even when no
 # known pattern matches — most often because the value is unquoted
 # (`.env`, YAML, INI) or the assignment uses `:` (YAML/JSON), both of
-# which the generic assignment pattern misses. Only the key's last
+# which the generic assignment pattern misses. Registry credential
+# files (`.npmrc`, `.pypirc`) are config files too: a `.pypirc`
+# `password = ...` line and an `.npmrc` `//host/:_authToken=...` line
+# are live registry credentials. Only the key's last
 # `-`/`_`/`/`-split token needs to be credential-like, so
 # `password_length` or `secret_santa` stay clean, and placeholder
 # values (changeme, ${VAR} references, masked ***) are skipped.
 _CONFIG_EXTS = {".ini", ".cfg", ".conf", ".yaml", ".yml", ".json",
                 ".toml", ".properties"}
 _CONFIG_CRED_TOKENS = {"password", "passwd", "pwd", "secret", "token",
-                        "apikey", "api_key", "accesskey", "privatekey",
-                        "auth", "credential"}
+                        "authtoken", "apikey", "api_key", "accesskey",
+                        "privatekey", "auth", "credential"}
 _CONFIG_PLACEHOLDERS = {"changeme", "change-me", "example", "placeholder",
                          "your-password", "your-secret", "your_api_key",
                          "password", "secret", "token", "xxx", "none",
@@ -333,9 +336,37 @@ _CONFIG_ASSIGN_RE = re.compile(
 
 def _is_config_file(filename: str) -> bool:
     base = os.path.basename(filename)
-    if base == ".env" or base.startswith(".env."):
+    if (base in (".env", ".npmrc", ".pypirc")
+            or base.startswith(".env.")):
         return True
     return os.path.splitext(base)[1].lower() in _CONFIG_EXTS
+
+
+# npm registry auth lines are scoped: `//host/:key=value` (the host may
+# carry a scope path, `//host/@scope/:key=value`). The key is the part
+# after `/:`, so `_authToken` and `password` take the same verdict as
+# their bare `key=value` forms below.
+_NPMRC_AUTH_RE = re.compile(
+    r"""^//[^:\s]+/:([A-Za-z0-9_.\-]+)\s*=\s*["']?([^"'\s,;]+)["']?,?\s*$"""
+)
+
+
+def _config_credential_decision(key: str, value: str):
+    """Shared verdict for a credential-named key and its value: return
+    ("Config Credential", "MED", value) when the key's last
+    `-`/`_`/`/`-split token is credential-like and the value is a
+    real-looking secret, or None. Placeholder values (changeme,
+    `${VAR}` references, masked `***`) and non-credential names
+    (`password_length`, `secret_santa`) stay clean."""
+    tokens = re.split(r"[_.\-]", key.lower())
+    if tokens[-1] not in _CONFIG_CRED_TOKENS:
+        return None
+    lowered = value.lower()
+    if (len(value) < 4 or lowered in _CONFIG_PLACEHOLDERS
+            or lowered.startswith("${") or lowered.startswith("<")
+            or set(value) <= set("*x")):
+        return None
+    return "Config Credential", "MED", value
 
 
 def _config_credential_hit(line: str, filename: str):
@@ -345,25 +376,30 @@ def _config_credential_hit(line: str, filename: str):
     Deliberately separate from `_match_line`: it only runs on config
     files and only after the patterns miss, so code files are
     unaffected and a known pattern always wins.
+
+    Registry credential files (`.npmrc`, `.pypirc`) get the same
+    key-name detection as `.env` files: a `.pypirc` `password = ...`
+    line and an `.npmrc` `//registry.npmjs.org/:_authToken=...` line
+    are both live credentials for a package registry, not generic
+    assignments.
     """
     if not _is_config_file(filename):
         return None
     stripped = line.strip()
-    if not stripped or stripped[0] in "#;/" or stripped.startswith("//"):
+    if not stripped:
+        return None
+    # npm scoped-auth lines start with `/`, which the comment guard
+    # below would reject, so try that form first for .npmrc files.
+    if os.path.basename(filename) == ".npmrc":
+        m = _NPMRC_AUTH_RE.match(stripped)
+        if m:
+            return _config_credential_decision(m.group(1), m.group(2))
+    if stripped[0] in "#;/" or stripped.startswith("//"):
         return None
     m = _CONFIG_ASSIGN_RE.match(stripped)
     if not m:
         return None
-    key, value = m.group(1).lower(), m.group(2)
-    tokens = re.split(r"[_.\-]", key)
-    if tokens[-1] not in _CONFIG_CRED_TOKENS:
-        return None
-    lowered = value.lower()
-    if (len(value) < 4 or lowered in _CONFIG_PLACEHOLDERS
-            or lowered.startswith("${") or lowered.startswith("<")
-            or set(value) <= set("*x")):
-        return None
-    return "Config Credential", "MED", value
+    return _config_credential_decision(m.group(1), m.group(2))
 
 
 # IaC credential heuristic: in infrastructure-as-code files, a hardcoded

@@ -147,3 +147,70 @@ class TestConfigCredentials:
         data = json.loads(server.scan_secrets(fp, json_output=True))
         assert data["findings"][0]["type"] == "Config Credential"
         assert "hunter2" not in json.dumps(data)
+
+
+class TestRegistryCredentialFiles:
+    def test_npmrc_scoped_auth_token_flagged(self, tmp_path):
+        fp = _write(
+            tmp_path, ".npmrc",
+            "//registry.npmjs.org/:_authToken=npm_a1b2c3d4e5f6\n",
+        )
+        report = server.scan_secrets(fp)
+        assert "[MED] Config Credential" in report
+        assert "MED: 1" in report
+
+    def test_npmrc_scoped_password_flagged(self, tmp_path):
+        fp = _write(
+            tmp_path, ".npmrc",
+            "//registry.npmjs.org/:password=hunter2hunter2\n",
+        )
+        assert "[MED] Config Credential" in server.scan_secrets(fp)
+
+    def test_npmrc_scoped_auth_with_scope_path_flagged(self, tmp_path):
+        # Scoped registries carry an extra path segment before /:.
+        fp = _write(
+            tmp_path, ".npmrc",
+            "//registry.npmjs.org/@myorg/:_authToken=npm_a1b2c3d4e5f6\n",
+        )
+        assert "[MED] Config Credential" in server.scan_secrets(fp)
+
+    def test_npmrc_bare_auth_token_flagged(self, tmp_path):
+        fp = _write(tmp_path, ".npmrc", "_authToken=npm_a1b2c3d4e5f6\n")
+        assert "[MED] Config Credential" in server.scan_secrets(fp)
+
+    def test_npmrc_placeholder_token_skipped(self, tmp_path):
+        fp = _write(
+            tmp_path, ".npmrc",
+            "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n",
+        )
+        assert "No hardcoded secrets detected" in server.scan_secrets(fp)
+
+    def test_npmrc_registry_line_stays_clean(self, tmp_path):
+        fp = _write(
+            tmp_path, ".npmrc",
+            "registry=https://registry.npmjs.org/\n",
+        )
+        assert "No hardcoded secrets detected" in server.scan_secrets(fp)
+
+    def test_pypirc_password_flagged(self, tmp_path):
+        fp = _write(
+            tmp_path, ".pypirc",
+            "[pypi]\nusername = __token__\npassword = pypi-a1b2c3d4e5f6\n",
+        )
+        report = server.scan_secrets(fp)
+        assert "[MED] Config Credential" in report
+        assert "MED: 1" in report
+
+    def test_pypirc_username_alone_stays_clean(self, tmp_path):
+        fp = _write(tmp_path, ".pypirc", "[pypi]\nusername = __token__\n")
+        assert "No hardcoded secrets detected" in server.scan_secrets(fp)
+
+    def test_npmrc_auth_token_value_masked_in_json(self, tmp_path):
+        import json
+        fp = _write(
+            tmp_path, ".npmrc",
+            "//registry.npmjs.org/:_authToken=npm_a1b2c3d4e5f6\n",
+        )
+        data = json.loads(server.scan_secrets(fp, json_output=True))
+        assert data["findings"][0]["type"] == "Config Credential"
+        assert "npm_a1b2c3d4e5f6" not in json.dumps(data)
