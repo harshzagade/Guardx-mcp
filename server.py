@@ -795,7 +795,8 @@ def _unique_secret_files(findings) -> list:
 
 
 def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
-                 since=None, history=None, skipped_large=0, config=None):
+                 since=None, history=None, skipped_large=0, config=None,
+                 duration_seconds=None):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
@@ -803,7 +804,10 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
     findings carry their commit short-SHA, and a history run adds a
     `history` object with the commit count and truncation flag.
     Files skipped for exceeding `MAX_FILE_BYTES` are counted as
-    `skipped_large_files` (0 when none were skipped).
+    `skipped_large_files` (0 when none were skipped). When the caller
+    passes `duration_seconds` (seconds the collection phase took,
+    rounded to 3 decimals), it rides along as `duration_seconds` so a
+    slow CI scan can be profiled per run.
     """
     report = {
         "tool": "scan_secrets",
@@ -833,6 +837,8 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
         report["since"] = since
     if history is not None:
         report["history"] = history
+    if duration_seconds is not None:
+        report["duration_seconds"] = duration_seconds
     if config is not None:
         report["config"] = {
             "path": config["path"],
@@ -848,7 +854,7 @@ _SARIF_LEVELS = {"HIGH": "error", "MED": "warning", "LOW": "note"}
 
 def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
                   suppressed=0, since=None, history=None, skipped_large=0,
-                  config=None):
+                  config=None, duration_seconds=None):
     """Build the SARIF 2.1.0 report dict for a `scan_secrets` run.
 
     One rule per distinct finding type (first-seen order), one result
@@ -859,6 +865,8 @@ def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
     commit short-SHA in `properties`. Run-level counts (files scanned,
     unique secrets, suppressed, skipped large files) ride along in
     `properties` so a CI consumer sees coverage, not just findings.
+    When the caller passes `duration_seconds`, it rides along as
+    `durationSeconds` in the same properties block.
     """
     rules = []
     seen_types = {}
@@ -914,6 +922,8 @@ def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
         run["properties"]["since"] = since
     if history is not None:
         run["properties"]["history"] = history
+    if duration_seconds is not None:
+        run["properties"]["durationSeconds"] = duration_seconds
     if config is not None:
         run["properties"]["config"] = os.path.relpath(
             config["path"], scan_root
@@ -1447,7 +1457,10 @@ def scan_secrets(
         The header carries per-severity counts plus a "Unique secrets"
         count — the number of distinct secret values across the whole
         scan, so a key committed in twelve files shows as one unique
-        secret rather than twelve independent findings. Files over
+        secret rather than twelve independent findings — and a "Scan
+        duration" line (seconds, 3 decimals; also `duration_seconds`
+        in JSON output and `durationSeconds` in SARIF run properties)
+        so a slow CI scan can be profiled per run. Files over
         1 MB (`MAX_FILE_BYTES`) are skipped unread, and the header
         reports how many were skipped (mirrored as
         `skipped_large_files` in JSON output) so a huge vendored file
@@ -1551,10 +1564,17 @@ def scan_secrets(
         auto = os.path.join(scan_root, BASELINE_FILENAME)
         baseline_hashes = _load_baseline(auto) if os.path.isfile(auto) else set()
 
+    # Time the collection phase itself (file walk + matching + history
+    # streaming), so a slow CI scan can be profiled per run: the header
+    # carries `Scan duration: 0.123s` and JSON/SARIF carry the same
+    # number. Config/baseline loading above is not timed — it is not
+    # part of the scan.
+    scan_started = time.monotonic()
     data, scan_error = _collect_secret_findings(
         path, scan_root, max_findings, exclude_patterns, baseline_hashes,
         since, history, entropy_threshold,
     )
+    duration_seconds = round(time.monotonic() - scan_started, 3)
     if scan_error is not None:
         if json_output:
             return json.dumps({"tool": "scan_secrets", "path": path,
@@ -1577,6 +1597,7 @@ def scan_secrets(
         f"Secret scan of {path}"
         + (" (git history)" if history else "")
         + f"\nFiles scanned: {scanned}"
+        + f"\nScan duration: {duration_seconds:.3f}s"
         + (f"\nSkipped (over 1 MB): {skipped_large}" if skipped_large else "")
         + f"\nFindings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
@@ -1618,26 +1639,30 @@ def scan_secrets(
                                             unique, sev_counts, suppressed,
                                             since, history_info,
                                             skipped_large=skipped_large,
-                                            config=config_report), indent=2)
+                                            config=config_report,
+                                            duration_seconds=duration_seconds), indent=2)
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
                                            unique, sev_counts, suppressed,
                                            since, history_info,
                                            skipped_large=skipped_large,
-                                           config=config_report))
+                                           config=config_report,
+                                           duration_seconds=duration_seconds))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if sarif_output:
         return json.dumps(_report_sarif(path, scan_root, scanned, findings,
                                         unique, sev_counts, suppressed,
                                         since, history_info,
                                         skipped_large=skipped_large,
-                                        config=config_report), indent=2)
+                                        config=config_report,
+                                        duration_seconds=duration_seconds), indent=2)
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
                                        unique, sev_counts, suppressed,
                                        since, history_info,
                                        skipped_large=skipped_large,
-                                       config=config_report), indent=2)
+                                       config=config_report,
+                                       duration_seconds=duration_seconds), indent=2)
 
     def _render_finding(f):
         lines = ", ".join(str(n) for n in f["lines"])

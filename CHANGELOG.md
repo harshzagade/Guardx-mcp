@@ -39,6 +39,14 @@ actual git history — no invented features.
   credential files (scoped `_authToken`/`password`, scoped-registry
   path, bare `_authToken`, placeholder skip, `registry=` clean,
   `.pypirc` password/username, JSON masking).
+- `scan_secrets`: scan duration in the report — the text header carries
+  a `Scan duration: 0.123s` line (seconds, 3 decimals), JSON output
+  carries `duration_seconds`, and SARIF carries `durationSeconds` in
+  the run properties, so a slow CI scan can be profiled per run. Only
+  the collection phase is timed; config/baseline loading is not.
+- `tests/test_scan_duration.py`: 6 unit tests (text header on clean and
+  finding scans, JSON field on both, SARIF property, both formats
+  report a non-negative float).
 - `scan_secrets(entropy_threshold=...)`: the high-entropy bar is now
   tunable per run — a number between 0 (exclusive) and 8, default 4.0 —
   so a noisy codebase can raise it (e.g. `4.5`) instead of disabling the
