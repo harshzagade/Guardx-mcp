@@ -1759,12 +1759,28 @@ OSV_MAX_RETRY_WAIT = 60.0  # never wait longer than this per retry
 
 
 def _parse_requirements(text: str):
-    """Yield (name, version) for pinned (==) requirements lines."""
+    """Yield (name, version) for pinned (==) requirements lines.
+
+    Extras and environment markers are stripped — the pin is what OSV
+    needs, and both forms are common in real-world files::
+
+        requests[security]==2.28.0            -> ("requests", "2.28.0")
+        package==1.0; python_version > "3.8"  -> ("package", "1.0")
+
+    Anything without an exact `==` pin (ranges, bare names, `-r` includes
+    and other options) is skipped, as before.
+    """
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
-        m = re.match(r"^([A-Za-z0-9._-]+)\s*==\s*([A-Za-z0-9._+!-]+)", line)
+        # Environment markers follow a ';' — everything after it is a
+        # condition on the install, not part of the pin.
+        line = line.split(";", 1)[0].strip()
+        m = re.match(
+            r"^([A-Za-z0-9._-]+)(?:\s*\[[^\]]*\])?\s*==\s*([A-Za-z0-9._+!-]+)",
+            line,
+        )
         if m:
             yield m.group(1), m.group(2)
 

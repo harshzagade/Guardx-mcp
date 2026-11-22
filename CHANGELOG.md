@@ -6,6 +6,16 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: `requirements.txt` extras/markers parsing — a
+  pinned line may carry extras (`requests[security]==2.28.0`) or an
+  environment marker (`package==1.0; python_version > "3.8"`); both are
+  stripped and the bare name + pinned version are audited, where the
+  strict `==` regex used to skip the line entirely. Ranges, bare names
+  and `-r`/option lines are still skipped.
+- `tests/test_requirements_extras.py`: 11 unit tests (extras, spaced and
+  multi-name extras, markers with and without spaces, extras + marker,
+  plain pin, unpinned/option lines skipped, trailing comment) plus an
+  audit-level test proving extras/marker lines reach OSV's querybatch.
 - `scan_secrets`: same-secret-same-file collapse — the same secret
   pasted on several lines of one file is now a single finding listing
   every line number (text `file:1, 4, 9`, JSON `lines` array, SARIF
