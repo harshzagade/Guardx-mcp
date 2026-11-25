@@ -6,6 +6,20 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: Gradle dependency support — `build.gradle` /
+  `build.gradle.kts` build scripts are parsed for pinned
+  `group:artifact:version` declarations (Groovy and Kotlin DSL, quoted
+  GAV strings and single-line map notation) and queried against OSV's
+  Maven ecosystem, so Java/Gradle projects are audited the same way
+  `pom.xml` projects are. Version-catalog references (`libs.*`),
+  `project(...)` / `files(...)` / `platform(...)` entries, dynamic
+  versions (`1.+`, `latest.release`) and interpolated versions
+  (`${...}`) are skipped rather than queried with a placeholder.
+- `tests/test_gradle.py`: 13 unit tests (Groovy + Kotlin DSL parsing,
+  map notation, catalog/platform/project/dynamic/interpolated skips,
+  commented-out lines, buildscript `classpath`, Maven-ecosystem
+  querybatch wiring, vuln reporting, clean-file message, unsupported
+  manifest message).
 - `audit_dependencies`: `requirements.txt` extras/markers parsing — a
   pinned line may carry extras (`requests[security]==2.28.0`) or an
   environment marker (`package==1.0; python_version > "3.8"`); both are

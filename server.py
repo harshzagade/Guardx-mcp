@@ -1937,6 +1937,98 @@ def _parse_pom_xml(text: str):
             yield f"{group}:{artifact}", version
 
 
+# Dependency configurations recognised in Gradle build scripts, in both
+# the Groovy DSL (`implementation "g:a:v"`) and the Kotlin DSL
+# (`implementation("g:a:v")`). `platform` / `enforcedPlatform` are
+# deliberately absent: a BOM pins other versions rather than being a
+# dependency itself.
+_GRADLE_CONFIGURATIONS = frozenset({
+    "implementation", "api", "compileOnly", "runtimeOnly",
+    "testImplementation", "testRuntimeOnly", "testCompileOnly",
+    "testFixturesImplementation", "testFixturesApi",
+    "annotationProcessor", "testAnnotationProcessor",
+    "kapt", "testKapt", "ksp", "testKsp",
+    "compile", "runtime", "provided", "developmentOnly",
+    "classpath", "testClasspath",
+})
+
+_GRADLE_GAV_RE = re.compile(
+    r"""^(?P<config>[A-Za-z_][A-Za-z0-9_]*)\s*\(?\s*["'](?P<gav>[^"']+)["']"""
+)
+
+_GRADLE_MAP_RE = re.compile(
+    r"""^(?P<config>[A-Za-z_][A-Za-z0-9_]*)\s*\(?\s*"""
+    r"""group\s*[:=]\s*["'](?P<group>[^"']+)["']\s*,\s*"""
+    r"""name\s*[:=]\s*["'](?P<name>[^"']+)["']\s*,\s*"""
+    r"""version\s*[:=]\s*["'](?P<version>[^"']+)["']"""
+)
+
+
+def _parse_gradle(text: str):
+    """Yield (group:artifact, version) for dependency declarations in a
+    Gradle build script (`build.gradle` / `build.gradle.kts`).
+
+    OSV's Maven ecosystem names a package `groupId:artifactId`, so that
+    is the name yielded here — Gradle's Java dependencies are Maven
+    coordinates. Both DSLs are read:
+
+    - quoted GAV strings, Groovy and Kotlin forms::
+
+        implementation "org.apache.commons:commons-lang3:3.12.0"
+        implementation("org.apache.commons:commons-lang3:3.12.0")
+        api 'com.google.code.gson:gson:2.10.1'
+
+    - single-line map notation, Groovy (`group: ...`) and Kotlin
+      (`group = ...`) forms::
+
+        implementation group: 'org.foo', name: 'bar', version: '1.0.0'
+
+    Only exact versions are reported. Skipped rather than guessed at:
+    version-catalog references (`implementation(libs.spring.core)`),
+    `project(...)` / `files(...)` / `platform(...)` entries, dynamic
+    versions (`1.+`, `latest.release`), and interpolated versions
+    (`${libVersion}`) — OSV needs a concrete version to query.
+    Multi-line map notation is not parsed; a declaration split across
+    lines is skipped the same way.
+    """
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        m = _GRADLE_MAP_RE.match(line)
+        if m and m.group("config") in _GRADLE_CONFIGURATIONS:
+            group, name, version = (
+                m.group("group"), m.group("name"), m.group("version"))
+            if "$" not in version and _is_gradle_version(version):
+                yield f"{group}:{name}", version
+            continue
+        m = _GRADLE_GAV_RE.match(line)
+        if m and m.group("config") in _GRADLE_CONFIGURATIONS:
+            parts = m.group("gav").split(":")
+            if len(parts) != 3:
+                continue
+            group, name, version = parts
+            if not group or not name:
+                continue
+            if "$" in m.group("gav"):
+                continue
+            if _is_gradle_version(version):
+                yield f"{group}:{name}", version
+
+
+def _is_gradle_version(version: str) -> bool:
+    """True when a Gradle version string is a concrete pinned version:
+    it starts with a digit and carries no dynamic-version marker
+    (`+`, `latest.*`) or interpolation. `1.0.0-SNAPSHOT` and
+    `2.0.0+build` metadata are fine — only a trailing `+` used as a
+    Gradle dynamic-version wildcard (`1.+`) is rejected."""
+    if not version or not version[0].isdigit():
+        return False
+    if version.endswith("+"):
+        return False
+    return True
+
+
 # Package-URL type -> OSV ecosystem, for CycloneDX SBOM components.
 _PURL_ECOSYSTEMS = {
     "maven": "Maven",
@@ -2342,7 +2434,9 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
 
     Supports Python (requirements.txt), npm (package.json), Go
-    modules (go.mod), and Maven (pom.xml). Only pinned/exact versions
+    modules (go.mod), and Maven (pom.xml, or a Gradle build script —
+    `build.gradle` / `build.gradle.kts` — whose Java dependencies are
+    Maven coordinates). Only pinned/exact versions
     are checked. Lockfiles
     resolve transitive dependencies too: `package-lock.json` (npm),
     `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) — so a
@@ -2362,8 +2456,8 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
 
     Args:
         path: Path to a requirements.txt, package.json, go.mod, pom.xml,
-            lockfile (package-lock.json, poetry.lock, Cargo.lock), or
-            CycloneDX SBOM (.json).
+            build.gradle / build.gradle.kts, lockfile (package-lock.json,
+            poetry.lock, Cargo.lock), or CycloneDX SBOM (.json).
         min_severity: Optional severity floor ("LOW", "MEDIUM"/"MED",
             "HIGH", "CRITICAL", any case). Vulnerabilities below the
             floor are hidden from the report and counted in the header,
@@ -2418,6 +2512,8 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
         triples = [(n, v, "Go") for n, v in _parse_go_mod(text)]
     elif name_lower == "pom.xml":
         triples = [(n, v, "Maven") for n, v in _parse_pom_xml(text)]
+    elif name_lower in ("build.gradle", "build.gradle.kts"):
+        triples = [(n, v, "Maven") for n, v in _parse_gradle(text)]
     elif "requirements" in name_lower or name_lower.endswith(".txt"):
         triples = [(n, v, "PyPI") for n, v in _parse_requirements(text)]
     elif name_lower.endswith(".json"):
@@ -2431,23 +2527,25 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             return (
                 f"Unsupported manifest: {name_lower}. "
                 "Provide a requirements.txt, package.json, go.mod, pom.xml, "
-                "package-lock.json, poetry.lock, Cargo.lock, or a "
-                "CycloneDX SBOM (.json)."
+                "build.gradle / build.gradle.kts, package-lock.json, "
+                "poetry.lock, Cargo.lock, or a CycloneDX SBOM (.json)."
             )
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
             "Provide a requirements.txt, package.json, go.mod, pom.xml, "
-            "package-lock.json, poetry.lock, Cargo.lock, or a "
-            "CycloneDX SBOM (.json)."
+            "build.gradle / build.gradle.kts, package-lock.json, "
+            "poetry.lock, Cargo.lock, or a CycloneDX SBOM (.json)."
         )
 
     if not triples:
         return (
             f"No pinned dependencies found in {path}. "
             '(Only exact versions are checked: "pkg==1.2.3" for pip, '
-            '"1.2.3" for npm, a go.mod require line, or a pom.xml '
-            "dependency with a groupId, artifactId, and version; lockfiles "
+            '"1.2.3" for npm, a go.mod require line, a pom.xml '
+            "dependency with a groupId, artifactId, and version, or a "
+            "Gradle dependency with a pinned group:artifact:version; "
+            "lockfiles "
             "contribute every package entry they contain; SBOM components "
             "need a package URL with a supported ecosystem and a version.)"
         )
