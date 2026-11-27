@@ -2042,6 +2042,10 @@ _PURL_ECOSYSTEMS = {
 # omits the `bomFormat` field.
 _SBOM_FILENAMES = ("sbom.json", "cyclonedx.json", "bom.json")
 
+# Filenames that mark a JSON file as an SPDX SBOM even when it omits
+# the `spdxVersion` field.
+_SPDX_FILENAMES = ("spdx.json",)
+
 
 def _parse_purl(purl: str):
     """(name, version, ecosystem) for a package URL, or None when the
@@ -2124,6 +2128,62 @@ def _parse_cyclonedx_sbom(data):
         parsed = _parse_purl(comp.get("purl"))
         if parsed is not None:
             yield parsed
+
+
+def _is_spdx(data, name_lower: str) -> bool:
+    """True when parsed JSON is an SPDX SBOM: an `spdxVersion` of
+    "SPDX-2.x" says so outright, and a file named like an SBOM
+    (`spdx.json`, `*.spdx.json`) with a `packages` list counts too,
+    for exporters that omit the field. Anything else — a random JSON
+    file with an incidental `packages` key, for example — is not an
+    SBOM."""
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("spdxVersion", "")).upper().startswith("SPDX-2."):
+        return True
+    if name_lower in _SPDX_FILENAMES or name_lower.endswith(".spdx.json"):
+        return isinstance(data.get("packages"), list)
+    return False
+
+
+def _parse_spdx_sbom(data):
+    """Yield (name, version, ecosystem) for the packages of a parsed
+    SPDX SBOM.
+
+    Each package is identified by the `purl` entry in its
+    `externalRefs`, which carries both the ecosystem and the canonical
+    package name — so one SBOM can mix Maven, npm, PyPI, Go, and
+    crates.io packages and each is queried against its own ecosystem.
+    Packages without a purl (or with an unsupported purl type, or no
+    version) are skipped rather than guessed at: without a purl there
+    is no reliable way to tell which ecosystem a bare name belongs to.
+    The packages the document itself describes (`documentDescribes`)
+    are the audited project, not a dependency, and are not yielded —
+    the SPDX mirror of CycloneDX's `metadata.component` skip."""
+    if not isinstance(data, dict):
+        return
+    described = data.get("documentDescribes")
+    described_ids = set(described) if isinstance(described, list) else set()
+    packages = data.get("packages")
+    if not isinstance(packages, list):
+        return
+    for pkg in packages:
+        if not isinstance(pkg, dict):
+            continue
+        if pkg.get("SPDXID") in described_ids:
+            continue
+        refs = pkg.get("externalRefs")
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            if str(ref.get("referenceType", "")).lower() != "purl":
+                continue
+            parsed = _parse_purl(ref.get("referenceLocator"))
+            if parsed is not None:
+                yield parsed
+                break
 
 
 def _parse_package_lock(text: str):
@@ -2443,7 +2503,10 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     vulnerability in a dependency-of-a-dependency is caught even when
     the direct manifest never names it. A CycloneDX SBOM (a JSON file
     with `bomFormat: CycloneDX`, or named `sbom.json`, `cyclonedx.json`,
-    `bom.json`, or `*.cdx.json`) is audited too: each component is
+    `bom.json`, or `*.cdx.json`) is audited too, and so is an SPDX 2.x
+    SBOM (a JSON file with `spdxVersion: SPDX-2.x`, or named
+    `spdx.json` / `*.spdx.json`, whose `packages` entries carry a
+    `purl` external reference): each component is
     identified by its package URL, so one SBOM can mix Maven, npm,
     PyPI, Go, and crates.io components and each is queried against its
     own ecosystem. The same package@version is queried against OSV
@@ -2454,10 +2517,17 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     per ecosystem (with the same 429 retry behaviour as a single
     query; a failed batch counts every dep as a lookup failure).
 
+    An SPDX SBOM is audited the same way as a CycloneDX one: a JSON
+    file with `spdxVersion: SPDX-2.x`, or named `spdx.json` /
+    `*.spdx.json`, whose `packages` entries carry a `purl` external
+    reference. Packages named in `documentDescribes` are the audited
+    project itself and are skipped, exactly like CycloneDX's
+    `metadata.component`.
+
     Args:
         path: Path to a requirements.txt, package.json, go.mod, pom.xml,
             build.gradle / build.gradle.kts, lockfile (package-lock.json,
-            poetry.lock, Cargo.lock), or CycloneDX SBOM (.json).
+            poetry.lock, Cargo.lock), or CycloneDX / SPDX SBOM (.json).
         min_severity: Optional severity floor ("LOW", "MEDIUM"/"MED",
             "HIGH", "CRITICAL", any case). Vulnerabilities below the
             floor are hidden from the report and counted in the header,
@@ -2523,19 +2593,21 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             sbom_data = None
         if sbom_data is not None and _is_cyclonedx(sbom_data, name_lower):
             triples = list(_parse_cyclonedx_sbom(sbom_data))
+        elif sbom_data is not None and _is_spdx(sbom_data, name_lower):
+            triples = list(_parse_spdx_sbom(sbom_data))
         else:
             return (
                 f"Unsupported manifest: {name_lower}. "
                 "Provide a requirements.txt, package.json, go.mod, pom.xml, "
                 "build.gradle / build.gradle.kts, package-lock.json, "
-                "poetry.lock, Cargo.lock, or a CycloneDX SBOM (.json)."
+                "poetry.lock, Cargo.lock, or a CycloneDX or SPDX SBOM (.json)."
             )
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
             "Provide a requirements.txt, package.json, go.mod, pom.xml, "
             "build.gradle / build.gradle.kts, package-lock.json, "
-            "poetry.lock, Cargo.lock, or a CycloneDX SBOM (.json)."
+            "poetry.lock, Cargo.lock, or a CycloneDX or SPDX SBOM (.json)."
         )
 
     if not triples:

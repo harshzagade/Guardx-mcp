@@ -6,6 +6,21 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: SPDX 2.x SBOM input — a JSON file with
+  `spdxVersion: SPDX-2.x`, or named `spdx.json` / `*.spdx.json`, is
+  audited alongside CycloneDX SBOMs: each package is identified by the
+  `purl` entry in its `externalRefs`, so one SBOM can mix Maven, npm,
+  PyPI, Go, and crates.io packages and each is queried against its own
+  ecosystem (one querybatch call per ecosystem; the header lists
+  them all). Packages named in `documentDescribes` are the audited
+  project itself and are skipped, exactly like CycloneDX's
+  `metadata.component`; packages without a purl, with an unsupported
+  purl type, or without a version are skipped rather than guessed at.
+- `tests/test_spdx_sbom.py`: 11 unit tests (multi-ecosystem purl
+  parsing, `documentDescribes` skip, CPE-only packages skipped,
+  `spdxVersion`/filename detection, SPDX-3.x not claimed, per-ecosystem
+  querybatch wiring, vuln reporting with fixed-version guidance,
+  unsupported-JSON message).
 - `audit_dependencies`: Gradle dependency support — `build.gradle` /
   `build.gradle.kts` build scripts are parsed for pinned
   `group:artifact:version` declarations (Groovy and Kotlin DSL, quoted
