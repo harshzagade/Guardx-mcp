@@ -796,7 +796,7 @@ def _unique_secret_files(findings) -> list:
 
 def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
                  since=None, history=None, skipped_large=0, config=None,
-                 duration_seconds=None):
+                 duration_seconds=None, fail_on=None, verdict=None):
     """Build the machine-readable `scan_secrets` report dict.
 
     Finding previews are masked with the same `_mask()` used by the text
@@ -807,7 +807,9 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
     `skipped_large_files` (0 when none were skipped). When the caller
     passes `duration_seconds` (seconds the collection phase took,
     rounded to 3 decimals), it rides along as `duration_seconds` so a
-    slow CI scan can be profiled per run.
+    slow CI scan can be profiled per run. When the caller passes a
+    severity gate (`fail_on` + `verdict`), both ride along so a
+    pipeline can read the gate outcome without parsing text.
     """
     report = {
         "tool": "scan_secrets",
@@ -839,6 +841,9 @@ def _report_json(path, scanned, findings, unique, sev_counts, suppressed=0,
         report["history"] = history
     if duration_seconds is not None:
         report["duration_seconds"] = duration_seconds
+    if fail_on is not None:
+        report["fail_on"] = fail_on
+        report["verdict"] = verdict
     if config is not None:
         report["config"] = {
             "path": config["path"],
@@ -854,7 +859,8 @@ _SARIF_LEVELS = {"HIGH": "error", "MED": "warning", "LOW": "note"}
 
 def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
                   suppressed=0, since=None, history=None, skipped_large=0,
-                  config=None, duration_seconds=None):
+                  config=None, duration_seconds=None, fail_on=None,
+                  verdict=None):
     """Build the SARIF 2.1.0 report dict for a `scan_secrets` run.
 
     One rule per distinct finding type (first-seen order), one result
@@ -866,7 +872,9 @@ def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
     unique secrets, suppressed, skipped large files) ride along in
     `properties` so a CI consumer sees coverage, not just findings.
     When the caller passes `duration_seconds`, it rides along as
-    `durationSeconds` in the same properties block.
+    `durationSeconds` in the same properties block. When the caller
+    passes a severity gate (`fail_on` + `verdict`), both ride along as
+    `failOn` and `verdict` in the same properties block.
     """
     rules = []
     seen_types = {}
@@ -924,6 +932,9 @@ def _report_sarif(path, scan_root, scanned, findings, unique, sev_counts,
         run["properties"]["history"] = history
     if duration_seconds is not None:
         run["properties"]["durationSeconds"] = duration_seconds
+    if fail_on is not None:
+        run["properties"]["failOn"] = fail_on
+        run["properties"]["verdict"] = verdict
     if config is not None:
         run["properties"]["config"] = os.path.relpath(
             config["path"], scan_root
@@ -1374,6 +1385,7 @@ def scan_secrets(
     history: bool = False,
     config: str | None = None,
     entropy_threshold: float | None = None,
+    fail_on: str | None = None,
 ) -> str:
     """Scan a file or directory for hardcoded secrets and credentials.
 
@@ -1445,6 +1457,19 @@ def scan_secrets(
             catch shorter, less random tokens. An explicit value always
             wins over the config file; an invalid value is an error
             naming the valid range.
+        fail_on: Optional severity gate for CI ("HIGH", "MEDIUM"/"MED",
+            or "LOW", any case). When set, the report carries a
+            verdict: FAIL when any finding is at or above the gate,
+            PASS otherwise — a `Verdict: FAIL — N finding(s) at or
+            above HIGH` line in the text header (or `Verdict: PASS —
+            no findings at or above HIGH`), `fail_on` + `verdict`
+            fields in JSON output, and `failOn` + `verdict` in SARIF
+            run properties. A pipeline should treat FAIL as a failing
+            gate (grep the text for `Verdict: FAIL`, or read the JSON
+            `verdict` field) rather than grepping for findings. An
+            invalid value is an error naming the valid values;
+            CRITICAL is not accepted — no scan finding is ever graded
+            CRITICAL, so it would be a gate that can never fire.
 
     Returns:
         A report of likely secrets with file, line number, type, and a
@@ -1546,6 +1571,34 @@ def scan_secrets(
     # The JSON/SARIF `config` object carries the effective settings, so
     # an explicit override is reflected there too, not just the file.
     config_settings["entropy_threshold"] = entropy_threshold
+    # The severity gate is validated before any scanning so a bad value
+    # fails fast instead of after a full scan. CRITICAL is rejected:
+    # no scan finding is ever graded CRITICAL, so it would be a gate
+    # that can never fire.
+    fail_label = None
+    fail_rank = None
+    if fail_on is not None:
+        if not isinstance(fail_on, str):
+            error = "fail_on must be a severity string: LOW, MEDIUM (or MED), or HIGH"
+            if json_output:
+                return json.dumps({"tool": "scan_secrets", "path": path,
+                                   "error": error})
+            return f"Error: {error}"
+        label = _MIN_SEVERITY_ALIASES.get(
+            fail_on.strip().upper(), fail_on.strip().upper()
+        )
+        rank = _SEVERITY_RANKS.get(label)
+        if rank is None or rank > _SEVERITY_RANKS["HIGH"]:
+            error = (
+                f"unknown fail_on: {fail_on!r}. "
+                "Use LOW, MEDIUM (or MED), or HIGH."
+            )
+            if json_output:
+                return json.dumps({"tool": "scan_secrets", "path": path,
+                                   "error": error})
+            return f"Error: {error}"
+        fail_label = {"LOW": "LOW", "MEDIUM": "MED", "HIGH": "HIGH"}[label]
+        fail_rank = rank
     effective_baseline = (
         baseline if baseline is not None else config_settings["baseline"]
     )
@@ -1602,6 +1655,25 @@ def scan_secrets(
         + f"\nFindings: {len(findings)} ({sev_summary})\n"
         f"Unique secrets: {unique}"
     )
+    # Severity gate: FAIL when any finding sits at or above the gate,
+    # PASS otherwise — so a pipeline can block on real secrets without
+    # grepping the finding list. `sev_counts` uses the scan labels
+    # HIGH/MED/LOW; the MEDIUM alias maps back to MED for the rank.
+    verdict = None
+    gated = 0
+    if fail_rank is not None:
+        gated = sum(
+            n for sev, n in sev_counts.items()
+            if _SEVERITY_RANKS[_MIN_SEVERITY_ALIASES.get(sev, sev)] >= fail_rank
+        )
+        verdict = "FAIL" if gated else "PASS"
+        if verdict == "FAIL":
+            header += (
+                f"\nVerdict: FAIL — {gated} finding(s) "
+                f"at or above {fail_label}"
+            )
+        else:
+            header += f"\nVerdict: PASS — no findings at or above {fail_label}"
     if history_info is not None:
         history_line = (
             f"\nGit history: {history_info['commits_scanned']} commit(s) scanned"
@@ -1640,14 +1712,18 @@ def scan_secrets(
                                             since, history_info,
                                             skipped_large=skipped_large,
                                             config=config_report,
-                                            duration_seconds=duration_seconds), indent=2)
+                                            duration_seconds=duration_seconds,
+                                            fail_on=fail_label,
+                                            verdict=verdict), indent=2)
         if json_output:
             return json.dumps(_report_json(path, scanned, findings,
                                            unique, sev_counts, suppressed,
                                            since, history_info,
                                            skipped_large=skipped_large,
                                            config=config_report,
-                                           duration_seconds=duration_seconds))
+                                           duration_seconds=duration_seconds,
+                                           fail_on=fail_label,
+                                           verdict=verdict))
         return header + "\n\nNo hardcoded secrets detected. [OK]"
     if sarif_output:
         return json.dumps(_report_sarif(path, scan_root, scanned, findings,
@@ -1655,14 +1731,18 @@ def scan_secrets(
                                         since, history_info,
                                         skipped_large=skipped_large,
                                         config=config_report,
-                                        duration_seconds=duration_seconds), indent=2)
+                                        duration_seconds=duration_seconds,
+                                        fail_on=fail_label,
+                                        verdict=verdict), indent=2)
     if json_output:
         return json.dumps(_report_json(path, scanned, findings,
                                        unique, sev_counts, suppressed,
                                        since, history_info,
                                        skipped_large=skipped_large,
                                        config=config_report,
-                                       duration_seconds=duration_seconds), indent=2)
+                                       duration_seconds=duration_seconds,
+                                       fail_on=fail_label,
+                                       verdict=verdict), indent=2)
 
     def _render_finding(f):
         lines = ", ".join(str(n) for n in f["lines"])

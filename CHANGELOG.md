@@ -6,6 +6,21 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `scan_secrets`: severity gate for CI — `fail_on="HIGH"` (also
+  `"MEDIUM"`/`"MED"` or `"LOW"`, any case) adds a verdict to the
+  report: FAIL when any finding sits at or above the gate, PASS
+  otherwise. The text header carries a `Verdict: FAIL — N finding(s)
+  at or above HIGH` line (or `Verdict: PASS — no findings at or above
+  HIGH`), JSON output carries `fail_on` + `verdict`, and SARIF carries
+  `failOn` + `verdict` in the run properties, so a pipeline can block
+  on real secrets without grepping the finding list. An invalid value
+  is an error naming the valid values; CRITICAL is rejected, since no
+  scan finding is ever graded CRITICAL and it would be a gate that
+  can never fire.
+- `tests/test_fail_on.py`: 17 unit tests (text/JSON/SARIF verdicts at
+  every gate, clean-scan PASS, gate counts, MEDIUM alias and
+  case-insensitivity, no gate means no verdict, invalid and
+  non-string values, CRITICAL rejected).
 - `audit_dependencies`: SPDX 2.x SBOM input — a JSON file with
   `spdxVersion: SPDX-2.x`, or named `spdx.json` / `*.spdx.json`, is
   audited alongside CycloneDX SBOMs: each package is identified by the
