@@ -2346,6 +2346,92 @@ def _parse_toml_lock(text: str):
         yield current["name"], current["version"]
 
 
+def _parse_pipfile_lock(text: str):
+    """Yield (name, version) pairs from a `Pipfile.lock`.
+
+    Pipenv's lockfile is JSON: the `default` and `develop` sections
+    map package names to entries whose `version` field is a `==` pin
+    (`"==2.28.0"`). Entries without a pin — `"*"` versions, editable
+    installs, git/path references — are skipped rather than queried
+    with a placeholder, and exact (name, version) duplicates (a
+    package pinned identically in both sections) are yielded once.
+    Malformed JSON yields nothing, so a broken lockfile never breaks
+    the audit.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+    seen = set()
+    for section in ("default", "develop"):
+        entries = data.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for name, info in entries.items():
+            if not isinstance(info, dict):
+                continue
+            version = info.get("version")
+            if not isinstance(version, str):
+                continue
+            version = version.strip()
+            if not version.startswith("=="):
+                continue
+            version = version[2:].strip()
+            if not version or version == "*":
+                continue
+            pair = (str(name), version)
+            if pair not in seen:
+                seen.add(pair)
+                yield pair
+
+
+def _parse_pipfile(text: str):
+    """Yield (name, version) pairs from a `Pipfile`'s pinned entries.
+
+    Only the `[packages]` and `[dev-packages]` sections are read, and
+    only entries with an exact `==` pin — plain strings
+    (`requests = "==2.28.0"`) or inline tables
+    (`flask = {version = "==2.2.2", extras = [...]}`). Unpinned
+    entries (`"*"`, `{git = ...}` / `{path = ...}` / `{editable =
+    true}`), other sections (`[source]`, `[requires]`, `[scripts]`),
+    and comments are skipped. No TOML library is needed — and none is
+    assumed, since the stdlib only gained `tomllib` in Python 3.11
+    while GuardX supports 3.10.
+    """
+    in_packages = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            m = re.match(r"^\[\s*([A-Za-z0-9_.-]+)\s*\]", line)
+            in_packages = bool(m) and m.group(1) in (
+                "packages",
+                "dev-packages",
+            )
+            continue
+        if not in_packages:
+            continue
+        m = re.match(
+            r"^([A-Za-z0-9._-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'"
+            r"|\{[^}]*\bversion\s*=\s*[\"']([^\"']+)[\"'][^}]*\})",
+            line,
+        )
+        if not m:
+            continue
+        version = m.group(2) or m.group(3) or m.group(4)
+        if version is None:
+            continue
+        version = version.strip()
+        if not version.startswith("=="):
+            continue
+        version = version[2:].strip()
+        if version and version != "*":
+            yield m.group(1), version
+
+
 async def _osv_query(client: httpx.AsyncClient, name: str, version: str, ecosystem: str):
     payload = {"version": version, "package": {"name": name, "ecosystem": ecosystem}}
     attempt = 0
@@ -2573,15 +2659,20 @@ def _dedupe_deps(deps: list) -> tuple[list, int]:
 async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     """Audit a dependency manifest against the OSV vulnerability database.
 
-    Supports Python (requirements.txt), npm (package.json), Go
+    Supports Python (requirements.txt, Pipenv's `Pipfile.lock` and
+    `Pipfile` pins), npm (package.json), Go
     modules (go.mod), and Maven (pom.xml, or a Gradle build script —
     `build.gradle` / `build.gradle.kts` — whose Java dependencies are
     Maven coordinates). Only pinned/exact versions
     are checked. Lockfiles
     resolve transitive dependencies too: `package-lock.json` (npm),
-    `poetry.lock` (PyPI), and `Cargo.lock` (crates.io) — so a
+    `poetry.lock` (PyPI), `Cargo.lock` (crates.io), and `Pipfile.lock`
+    (PyPI, `default` + `develop` sections; unpinned, editable, and
+    git/path entries skipped) — so a
     vulnerability in a dependency-of-a-dependency is caught even when
-    the direct manifest never names it. A CycloneDX SBOM (a JSON file
+    the direct manifest never names it. A `Pipfile`'s `[packages]` /
+    `[dev-packages]` entries with an exact `==` pin are audited the
+    same way; unpinned (`"*"`) and git/path entries are skipped. A CycloneDX SBOM (a JSON file
     with `bomFormat: CycloneDX`, or named `sbom.json`, `cyclonedx.json`,
     `bom.json`, or `*.cdx.json`) is audited too, and so is an SPDX 2.x
     SBOM (a JSON file with `spdxVersion: SPDX-2.x`, or named
@@ -2607,7 +2698,8 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
     Args:
         path: Path to a requirements.txt, package.json, go.mod, pom.xml,
             build.gradle / build.gradle.kts, lockfile (package-lock.json,
-            poetry.lock, Cargo.lock), or CycloneDX / SPDX SBOM (.json).
+            poetry.lock, Cargo.lock, Pipfile.lock), Pipfile, or
+            CycloneDX / SPDX SBOM (.json).
         min_severity: Optional severity floor ("LOW", "MEDIUM"/"MED",
             "HIGH", "CRITICAL", any case). Vulnerabilities below the
             floor are hidden from the report and counted in the header,
@@ -2656,6 +2748,10 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
         triples = [(n, v, "PyPI") for n, v in _parse_toml_lock(text)]
     elif name_lower == "cargo.lock":
         triples = [(n, v, "crates.io") for n, v in _parse_toml_lock(text)]
+    elif name_lower == "pipfile.lock":
+        triples = [(n, v, "PyPI") for n, v in _parse_pipfile_lock(text)]
+    elif name_lower == "pipfile":
+        triples = [(n, v, "PyPI") for n, v in _parse_pipfile(text)]
     elif name_lower.endswith("package.json"):
         triples = [(n, v, "npm") for n, v in _parse_package_json(text)]
     elif name_lower == "go.mod":
@@ -2680,14 +2776,14 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
                 f"Unsupported manifest: {name_lower}. "
                 "Provide a requirements.txt, package.json, go.mod, pom.xml, "
                 "build.gradle / build.gradle.kts, package-lock.json, "
-                "poetry.lock, Cargo.lock, or a CycloneDX or SPDX SBOM (.json)."
+                "poetry.lock, Cargo.lock, Pipfile.lock, Pipfile, or a CycloneDX or SPDX SBOM (.json)."
             )
     else:
         return (
             f"Unsupported manifest: {name_lower}. "
             "Provide a requirements.txt, package.json, go.mod, pom.xml, "
             "build.gradle / build.gradle.kts, package-lock.json, "
-            "poetry.lock, Cargo.lock, or a CycloneDX or SPDX SBOM (.json)."
+            "poetry.lock, Cargo.lock, Pipfile.lock, Pipfile, or a CycloneDX or SPDX SBOM (.json)."
         )
 
     if not triples:
@@ -2698,7 +2794,9 @@ async def audit_dependencies(path: str, min_severity: str | None = None) -> str:
             "dependency with a groupId, artifactId, and version, or a "
             "Gradle dependency with a pinned group:artifact:version; "
             "lockfiles "
-            "contribute every package entry they contain; SBOM components "
+            "contribute every package entry they contain, and a "
+            "Pipfile contributes its `==`-pinned entries; "
+            "SBOM components "
             "need a package URL with a supported ecosystem and a version.)"
         )
 

@@ -6,6 +6,21 @@ actual git history — no invented features.
 ## [Unreleased]
 
 ### Added
+- `audit_dependencies`: Pipenv support — `Pipfile.lock` (`default` +
+  `develop` sections, `==` pins only; unpinned, editable, and
+  git/path entries skipped) and `Pipfile` (`[packages]` /
+  `[dev-packages]` entries with an exact `==` pin, as plain strings
+  or `{version = "==x.y.z"}` tables) are audited against OSV's PyPI
+  ecosystem, so Pipenv projects no longer need a `requirements.txt`
+  export to be checked. Both parsers are stdlib-only (the `Pipfile`
+  reader is a small TOML subset, since `tomllib` needs Python 3.11
+  while GuardX supports 3.10); malformed inputs yield nothing instead
+  of breaking the audit.
+- `tests/test_pipenv.py`: 13 unit tests (Pipfile.lock default/develop
+  parsing, unpinned/editable/git entries skipped, duplicate pins
+  deduped, malformed JSON; Pipfile string/table pins, `*` and git
+  entries skipped, non-package sections ignored; audit-level PyPI
+  queries for both files; unsupported-manifest message lists both).
 - `scan_secrets`: severity gate for CI — `fail_on="HIGH"` (also
   `"MEDIUM"`/`"MED"` or `"LOW"`, any case) adds a verdict to the
   report: FAIL when any finding sits at or above the gate, PASS
